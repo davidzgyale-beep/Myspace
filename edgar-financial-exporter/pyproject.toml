@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "edgar-financial-exporter"
+version = "0.1.0"
+description = "Fetch SEC EDGAR company financial data (XBRL company facts) and export standardized Excel workbooks."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Your Name" }]
+dependencies = [
+    "requests>=2.31",
+    "pandas>=2.0",
+    "openpyxl>=3.1",
+    "typer>=0.9",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+]
+
+[project.scripts]
+edgar-export = "edgar_exporter.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
