@@ -1,0 +1,7 @@
+feedparser>=6.0
+requests>=2.31
+schedule>=1.2
+
+# Optional convenience, not required: if installed, config.py will auto-load
+# a .env file. Otherwise just export the env vars yourself.
+# python-dotenv>=1.0

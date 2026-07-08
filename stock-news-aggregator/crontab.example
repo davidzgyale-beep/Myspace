@@ -1,0 +1,10 @@
+# Example crontab entries for stock-news-aggregator.
+# Edit the paths below to match your environment, then install with:
+#   crontab -e
+# (paste the relevant lines in, adjusting paths first)
+
+# Fetch all sources every 15 minutes.
+*/15 * * * * cd /absolute/path/to/stock-news-aggregator && /absolute/path/to/venv/bin/python run.py fetch >> logs/fetch.log 2>&1
+
+# Generate the previous day's Markdown report shortly after midnight UTC.
+5 0 * * * cd /absolute/path/to/stock-news-aggregator && /absolute/path/to/venv/bin/python run.py report >> logs/report.log 2>&1
