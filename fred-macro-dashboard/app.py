@@ -8,6 +8,7 @@ Run with:
 import argparse
 import sys
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 
@@ -20,6 +21,31 @@ TRANSFORM_LABELS = {
     "% change": transform.PCT_CHANGE,
     "YoY % change": transform.YOY,
 }
+
+CHART_HEIGHT = 260
+CHART_COLUMNS = 2
+
+
+def _y_axis_label(series_id: str, transform_mode: str) -> str:
+    if transform_mode == transform.LEVEL:
+        return config.SERIES[series_id]["unit"]
+    return "Percent"
+
+
+def _make_chart(df: pd.DataFrame, y_label: str, start: pd.Timestamp, end: pd.Timestamp) -> alt.Chart:
+    return (
+        alt.Chart(df)
+        .mark_line()
+        .encode(
+            x=alt.X("date:T", title="Date", scale=alt.Scale(domain=[start.isoformat(), end.isoformat()])),
+            y=alt.Y("value:Q", title=y_label),
+            tooltip=[
+                alt.Tooltip("date:T", title="Date", format="%Y-%m-%d"),
+                alt.Tooltip("value:Q", title=y_label, format=".2f"),
+            ],
+        )
+        .properties(height=CHART_HEIGHT)
+    )
 
 
 def _parse_cli_args():
@@ -124,19 +150,18 @@ def main():
             )
 
     st.subheader(transform_label or "Level")
-    for sid, df in raw_data.items():
-        windowed = df[(df["date"] >= start) & (df["date"] <= end)]
-        transformed = transform.apply_transform(windowed, transform_mode)
-        with st.container(border=True):
-            st.markdown(f"**{sid} – {config.SERIES[sid]['label']}**")
-            st.line_chart(
-                transformed,
-                x="date",
-                y="value",
-                x_label="Date",
-                y_label=transform_label or "Level",
-                width="stretch",
-            )
+    series_ids = list(raw_data.keys())
+    for row_start in range(0, len(series_ids), CHART_COLUMNS):
+        row_ids = series_ids[row_start : row_start + CHART_COLUMNS]
+        cols = st.columns(CHART_COLUMNS)
+        for col, sid in zip(cols, row_ids):
+            df = raw_data[sid]
+            windowed = df[(df["date"] >= start) & (df["date"] <= end)]
+            transformed = transform.apply_transform(windowed, transform_mode)
+            y_label = _y_axis_label(sid, transform_mode)
+            with col, st.container(border=True, height="stretch"):
+                st.markdown(f"**{sid} – {config.SERIES[sid]['label']}**")
+                st.altair_chart(_make_chart(transformed, y_label, start, end), width="stretch")
 
 
 if __name__ == "__main__":
