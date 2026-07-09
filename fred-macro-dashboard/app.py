@@ -1,4 +1,4 @@
-"""Streamlit entry point for the FRED macro dashboard.
+"""Streamlit entry point for the macro + commodities dashboard.
 
 Run with:
     streamlit run app.py
@@ -9,7 +9,6 @@ import argparse
 import sys
 
 import pandas as pd
-import plotly.express as px
 import streamlit as st
 
 import config
@@ -18,8 +17,8 @@ from fetch import FredRequestError, MissingAPIKeyError, get_series
 
 TRANSFORM_LABELS = {
     "Level": transform.LEVEL,
-    "% Change": transform.PCT_CHANGE,
-    "YoY % Change": transform.YOY,
+    "% change": transform.PCT_CHANGE,
+    "YoY % change": transform.YOY,
 }
 
 
@@ -41,10 +40,14 @@ def _init_state():
 
 
 def main():
-    st.set_page_config(page_title="FRED Macro Dashboard", layout="wide")
+    st.set_page_config(
+        page_title="Macro dashboard",
+        page_icon=":material/monitoring:",
+        layout="wide",
+    )
     _init_state()
 
-    st.title("FRED Macro Dashboard")
+    st.title("Macro dashboard")
 
     with st.sidebar:
         st.header("Controls")
@@ -52,12 +55,16 @@ def main():
             "Series",
             options=list(config.SERIES.keys()),
             default=list(config.SERIES.keys()),
-            format_func=lambda sid: f"{sid} – {config.SERIES[sid]}",
+            format_func=lambda sid: f"{sid} – {config.SERIES[sid]['label']}",
         )
-        transform_label = st.radio("View", list(TRANSFORM_LABELS.keys()))
-        transform_mode = TRANSFORM_LABELS[transform_label]
+        transform_label = st.segmented_control(
+            "View",
+            list(TRANSFORM_LABELS.keys()),
+            default="Level",
+        )
+        transform_mode = TRANSFORM_LABELS[transform_label or "Level"]
 
-        if st.button("Refresh selected from FRED"):
+        if st.button("Refresh selected", icon=":material/refresh:"):
             st.session_state.refresh_token += 1
             st.cache_data.clear()
 
@@ -71,13 +78,13 @@ def main():
         try:
             raw_data[sid] = _load_series(sid, st.session_state.refresh_token)
         except MissingAPIKeyError as exc:
-            st.error(f"**Missing API key.** {exc}")
+            st.error(f"**Missing API key.** {exc}", icon=":material/key_off:")
             st.stop()
         except FredRequestError as exc:
             errors[sid] = str(exc)
 
     for sid, message in errors.items():
-        st.warning(f"Couldn't load {sid}: {message}")
+        st.warning(f"Couldn't load {sid}: {message}", icon=":material/warning:")
 
     if not raw_data:
         st.stop()
@@ -95,13 +102,12 @@ def main():
     start, end = pd.Timestamp(date_range[0]), pd.Timestamp(date_range[1])
 
     st.subheader("Summary")
-    summary_cols = st.columns(len(raw_data))
-    for col, (sid, df) in zip(summary_cols, raw_data.items()):
-        windowed = df[(df["date"] >= start) & (df["date"] <= end)]
-        summary = transform.latest_summary(windowed)
-        with col:
+    with st.container(horizontal=True):
+        for sid, df in raw_data.items():
+            windowed = df[(df["date"] >= start) & (df["date"] <= end)]
+            summary = transform.latest_summary(windowed)
             st.metric(
-                label=f"{sid}",
+                label=sid,
                 value=(
                     f"{summary['latest_value']:.2f}"
                     if summary["latest_value"] is not None
@@ -112,22 +118,25 @@ def main():
                     if summary["change"] is not None
                     else None
                 ),
-                help=config.SERIES[sid],
+                help=config.SERIES[sid]["label"],
+                border=True,
+                chart_data=windowed["value"].tail(12).tolist() or None,
             )
 
-    st.subheader(transform_label)
+    st.subheader(transform_label or "Level")
     for sid, df in raw_data.items():
         windowed = df[(df["date"] >= start) & (df["date"] <= end)]
         transformed = transform.apply_transform(windowed, transform_mode)
-        fig = px.line(
-            transformed,
-            x="date",
-            y="value",
-            title=f"{sid} – {config.SERIES[sid]}",
-            labels={"date": "Date", "value": transform_label},
-        )
-        fig.update_traces(hovertemplate="%{x|%Y-%m-%d}: %{y:.2f}<extra></extra>")
-        st.plotly_chart(fig, use_container_width=True)
+        with st.container(border=True):
+            st.markdown(f"**{sid} – {config.SERIES[sid]['label']}**")
+            st.line_chart(
+                transformed,
+                x="date",
+                y="value",
+                x_label="Date",
+                y_label=transform_label or "Level",
+                width="stretch",
+            )
 
 
 if __name__ == "__main__":

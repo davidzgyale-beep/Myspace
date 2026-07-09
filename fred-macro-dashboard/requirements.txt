@@ -1,9 +1,5 @@
 requests>=2.31
 pandas>=2.0
 streamlit>=1.32
-plotly>=5.20
 pytest>=7.4
-
-# Optional convenience: if installed, fetch.py will auto-load a .env file.
-# Otherwise just export FRED_API_KEY yourself.
-# python-dotenv>=1.0
+python-dotenv>=1.0
