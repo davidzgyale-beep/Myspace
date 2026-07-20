@@ -31,7 +31,7 @@ python build_snapshot.py
 
 1. 将本目录连同 `data/` 提交到公开 Git 仓库。
 2. 在 Streamlit Community Cloud 选择仓库。
-3. Main file path 指向 `Barra收益归因分析/A-share/momentum_dashboard/streamlit_app.py`。
+3. Main file path 指向 `Healthcare study/Barra收益归因分析/A-share/momentum_dashboard/streamlit_app.py`。
 4. 部署即可；无需配置 Secrets。
 
 ## 分组规则
