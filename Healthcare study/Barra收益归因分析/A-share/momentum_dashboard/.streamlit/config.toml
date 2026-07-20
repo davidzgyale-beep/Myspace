@@ -1,0 +1,15 @@
+[theme]
+base = "light"
+primaryColor = "#C8423B"
+backgroundColor = "#F7F5F0"
+secondaryBackgroundColor = "#EEEAE2"
+textColor = "#22262A"
+font = "sans-serif"
+chartCategoricalColors = ["#C8423B", "#D69B35", "#587A95", "#5F8F73", "#8A6F9E"]
+
+[server]
+headless = true
+maxUploadSize = 10
+
+[browser]
+gatherUsageStats = false
