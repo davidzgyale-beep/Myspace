@@ -22,6 +22,14 @@ def percentile(series: pd.Series) -> pd.Series:
     return series.rank(method="average", pct=True, na_option="keep")
 
 
+def positive_subindustry_percentile(frame: pd.DataFrame, column: str) -> pd.Series:
+    """Rank positive valuation observations within each healthcare subindustry."""
+    valid = frame[column].where(frame[column] > 0)
+    return valid.groupby(frame["healthcare_subindustry"], dropna=False).transform(
+        lambda values: values.rank(method="average", pct=True, na_option="keep")
+    )
+
+
 def trailing_return(prices: pd.DataFrame, sessions: int) -> pd.Series:
     if len(prices) <= sessions:
         return pd.Series(index=prices.columns, dtype=float)
@@ -85,6 +93,8 @@ def build_snapshot(source_dir: Path) -> None:
     metrics["drawdown_250d"] = close / high250 - 1.0
     metrics["above_ma20"] = close > ma20
     metrics["above_ma60"] = close > ma60
+    daily_returns = latest.pct_change(fill_method=None)
+    metrics["volatility_20d"] = daily_returns.tail(20).std() * np.sqrt(252)
     metrics = metrics.reset_index()
 
     keep = [
@@ -93,6 +103,30 @@ def build_snapshot(source_dir: Path) -> None:
     ]
     metrics = metrics.merge(universe[keep], on="ts_code", how="left", validate="one_to_one")
     metrics["market_cap_100m"] = pd.to_numeric(metrics["total_mv_cny"], errors="coerce") / 1e8
+    metrics["latest_pe_ttm"] = pd.to_numeric(metrics["latest_pe_ttm"], errors="coerce")
+    metrics["latest_pb"] = pd.to_numeric(metrics["latest_pb"], errors="coerce")
+    metrics["price_stale_days"] = (latest_date - pd.to_datetime(metrics["price_date"])).dt.days
+    valuation_dates = pd.to_datetime(universe["market_value_trade_date"].astype("string"), format="%Y%m%d", errors="coerce")
+    valuation_date = valuation_dates.max()
+    metrics["valuation_as_of_date"] = valuation_date
+    metrics["pe_valid"] = metrics["latest_pe_ttm"] > 0
+    metrics["pb_valid"] = metrics["latest_pb"] > 0
+    metrics["pe_percentile_sub"] = positive_subindustry_percentile(metrics, "latest_pe_ttm")
+    metrics["pb_percentile_sub"] = positive_subindustry_percentile(metrics, "latest_pb")
+    pe_weight = metrics["pe_valid"].astype(float) * 0.60
+    pb_weight = metrics["pb_valid"].astype(float) * 0.40
+    valuation_weight = pe_weight + pb_weight
+    value_raw = (
+        (1 - metrics["pe_percentile_sub"].fillna(0)) * pe_weight
+        + (1 - metrics["pb_percentile_sub"].fillna(0)) * pb_weight
+    )
+    metrics["valuation_score"] = (value_raw / valuation_weight * (0.75 + 0.25 * valuation_weight) * 100).where(valuation_weight > 0)
+    metrics["valuation_status"] = np.select(
+        [metrics["pe_valid"] & metrics["pb_valid"], metrics["pb_valid"]],
+        ["PE+PB有效", "仅PB有效"],
+        default="估值缺失",
+    )
+    metrics["valuation_coverage"] = valuation_weight
 
     return_cols = ["ret_5d", "ret_20d", "ret_60d", "ret_120d"]
     weights = {"ret_5d": 0.10, "ret_20d": 0.30, "ret_60d": 0.35, "ret_120d": 0.15}
@@ -116,11 +150,31 @@ def build_snapshot(source_dir: Path) -> None:
     )
     metrics["overheat_score"] = heat_raw.mul(100).clip(0, 100)
     metrics[["momentum_score", "overheat_score"]] = metrics[["momentum_score", "overheat_score"]].fillna(0.0)
+    metrics["volatility_percentile"] = percentile(metrics["volatility_20d"]).fillna(1.0)
+    metrics["stale_risk"] = metrics["price_stale_days"].clip(0, 30) / 30
+    metrics["risk_score"] = (metrics["overheat_score"] * 0.70 + metrics["volatility_percentile"] * 100 * 0.20 + metrics["stale_risk"] * 100 * 0.10).clip(0, 100)
+    metrics["data_completeness_score"] = (
+        metrics["price_date"].notna().astype(float) * 0.55
+        + metrics["valuation_coverage"].fillna(0).clip(0, 1) * 0.45
+    ) * 100
+    metrics["research_score"] = (
+        metrics["momentum_score"] * 0.60
+        + metrics["valuation_score"].fillna(50) * 0.25
+        + (100 - metrics["risk_score"]) * 0.15
+    ).clip(0, 100)
     metrics["temperature"] = metrics.apply(classify_temperature, axis=1)
     metrics["group"] = metrics.apply(classify_group, axis=1)
+    metrics["signal_label"] = np.select(
+        [
+            (metrics["momentum_score"] >= 70) & (metrics["overheat_score"] < OVERHEAT_THRESHOLD),
+            (metrics["momentum_score"] >= 70) & (metrics["overheat_score"] >= OVERHEAT_THRESHOLD),
+            (metrics["valuation_score"] >= 70) & (metrics["momentum_score"] < 70),
+        ],
+        ["强趋势低过热", "强趋势高过热", "估值便宜待确认"],
+        default="弱趋势/数据不足",
+    )
     metrics["subindustry_rank"] = metrics.groupby("healthcare_subindustry")["momentum_score"].rank(method="min", ascending=False).astype("Int64")
     metrics["subindustry_count"] = metrics.groupby("healthcare_subindustry")["ts_code"].transform("count")
-    metrics["price_stale_days"] = (latest_date - pd.to_datetime(metrics["price_date"])).dt.days
     metrics = metrics.sort_values(
         ["momentum_score", "ret_20d", "ts_code"], ascending=[False, False, True], na_position="last"
     ).reset_index(drop=True)
@@ -153,7 +207,8 @@ def build_snapshot(source_dir: Path) -> None:
         "stock_count": int(len(metrics)),
         "subindustry_count": int(metrics["healthcare_subindustry"].nunique()),
         "price_history_start": history["trade_date"].min().strftime("%Y-%m-%d"),
-        "methodology_version": "1.1.0",
+        "valuation_as_of_date": valuation_date.strftime("%Y-%m-%d") if pd.notna(valuation_date) else None,
+        "methodology_version": "1.2.0",
     }
     (DATA_DIR / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"Built dashboard snapshot for {len(metrics)} stocks as of {metadata['as_of_date']}")

@@ -1,8 +1,9 @@
 {
   "as_of_date": "2026-07-17",
-  "generated_at": "2026-07-20T18:42:12.735896+08:00",
+  "generated_at": "2026-07-20T19:07:09.396405+08:00",
   "stock_count": 310,
   "subindustry_count": 22,
   "price_history_start": "2025-01-13",
-  "methodology_version": "1.1.0"
+  "valuation_as_of_date": "2026-07-14",
+  "methodology_version": "1.2.0"
 }
