@@ -15,6 +15,7 @@ APP_DIR = Path(__file__).resolve().parent
 DEFAULT_SOURCE_DIR = APP_DIR.parent / "Full version" / "universe"
 DATA_DIR = APP_DIR / "data"
 TARGET_COUNT = 310
+OVERHEAT_THRESHOLD = 90
 
 
 def percentile(series: pd.Series) -> pd.Series:
@@ -28,7 +29,7 @@ def trailing_return(prices: pd.DataFrame, sessions: int) -> pd.Series:
 
 
 def classify_temperature(row: pd.Series) -> str:
-    if row["overheat_score"] >= 80:
+    if row["overheat_score"] >= OVERHEAT_THRESHOLD:
         return "过热"
     if row["overheat_score"] >= 60:
         return "偏热"
@@ -40,7 +41,7 @@ def classify_temperature(row: pd.Series) -> str:
 def classify_group(row: pd.Series) -> str:
     enough_data = row["trading_days"] >= 121
     trend_confirmed = row["ret_20d"] > 0 and row["ret_60d"] > 0 and row["above_ma20"] and row["above_ma60"]
-    if enough_data and row["momentum_score"] >= 70 and trend_confirmed and row["overheat_score"] < 85:
+    if enough_data and row["momentum_score"] >= 70 and trend_confirmed and row["overheat_score"] < OVERHEAT_THRESHOLD:
         return "A"
     if enough_data and row["momentum_score"] >= 40 and row["ret_20d"] > -0.05:
         return "B"
@@ -152,7 +153,7 @@ def build_snapshot(source_dir: Path) -> None:
         "stock_count": int(len(metrics)),
         "subindustry_count": int(metrics["healthcare_subindustry"].nunique()),
         "price_history_start": history["trade_date"].min().strftime("%Y-%m-%d"),
-        "methodology_version": "1.0.0",
+        "methodology_version": "1.1.0",
     }
     (DATA_DIR / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"Built dashboard snapshot for {len(metrics)} stocks as of {metadata['as_of_date']}")
