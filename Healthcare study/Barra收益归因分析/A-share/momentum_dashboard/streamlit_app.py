@@ -19,13 +19,17 @@ st.set_page_config(page_title="A股医疗研究看板", page_icon=":material/que
 
 
 @st.cache_data(show_spinner="正在载入研究快照…")
-def load_snapshot() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, dict]:
+def load_snapshot() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, dict, dict]:
     rankings = pd.read_csv(DATA_DIR / "momentum_snapshot.csv", parse_dates=["price_date", "valuation_as_of_date"])
     history = pd.read_csv(DATA_DIR / "price_history.csv.gz", parse_dates=["trade_date"])
     industries = pd.read_csv(DATA_DIR / "subindustry_snapshot.csv")
-    market_cap_validation = pd.read_csv(DATA_DIR / "market_cap_validation.csv")
+    group_backtest = pd.read_csv(DATA_DIR / "group_backtest_summary.csv")
+    group_backtest_yearly = pd.read_csv(DATA_DIR / "group_backtest_yearly.csv")
+    group_backtest_metadata = json.loads(
+        (DATA_DIR / "group_backtest_metadata.json").read_text(encoding="utf-8")
+    )
     metadata = json.loads((DATA_DIR / "metadata.json").read_text(encoding="utf-8"))
-    return rankings, history, industries, market_cap_validation, metadata
+    return rankings, history, industries, group_backtest, group_backtest_yearly, group_backtest_metadata, metadata
 
 
 def pct(value: float) -> str:
@@ -58,7 +62,7 @@ def apply_industry_batch() -> None:
     st.session_state["selected_industries"] = sorted((current | additions) - removals)
 
 
-rankings, history, industries, market_cap_validation, meta = load_snapshot()
+rankings, history, industries, group_backtest, group_backtest_yearly, group_backtest_meta, meta = load_snapshot()
 ALL_INDUSTRIES = sorted(rankings["healthcare_subindustry"].dropna().unique().tolist())
 top_industries = industries.sort_values("median_momentum", ascending=False)["healthcare_subindustry"].head(7).tolist()
 INDUSTRY_PRESETS = {
@@ -90,13 +94,6 @@ with st.sidebar:
         st.form_submit_button("应用批量修改", on_click=apply_industry_batch, icon=":material/tune:")
 
     selected_groups = st.pills("股票标签", ["A", "B", "C"], default=["A", "B", "C"], key="selected_groups", selection_mode="multi")
-    selected_cap_segments = st.pills(
-        "市值分层",
-        ["小市值（<100亿）", "中大市值（≥100亿）"],
-        default=["小市值（<100亿）", "中大市值（≥100亿）"],
-        key="selected_cap_segments",
-        selection_mode="multi",
-    )
     market_cap_max = int(np.ceil(rankings["market_cap_100m"].max() / 100) * 100)
     market_cap_range = st.slider("总市值（亿元）", 0, market_cap_max, (0, market_cap_max), 10)
     signal_choices = ["全部信号", "强趋势低过热", "强趋势高过热", "估值便宜待确认", "弱趋势/数据不足"]
@@ -107,7 +104,6 @@ with st.sidebar:
 filtered = rankings[
     rankings["healthcare_subindustry"].isin(st.session_state.get("selected_industries", []))
     & rankings["group"].isin(selected_groups or [])
-    & rankings["market_cap_segment"].isin(selected_cap_segments or [])
     & rankings["market_cap_100m"].fillna(0).between(*market_cap_range)
 ].copy()
 if signal_filter != "全部信号":
@@ -132,8 +128,8 @@ with st.container(horizontal=True):
     st.metric("20日收益中位数", pct(filtered["ret_20d"].median()), border=True)
     st.metric("高追高风险", f"{(filtered['overheat_score'] >= 90).sum()} 只", border=True)
 
-overview_tab, cap_tab, ranking_tab, stock_tab, compare_tab, method_tab = st.tabs(
-    ["市场状态", "市值分层", "股票排名", "个股拆解", "个股比较", "评分方法"]
+overview_tab, backtest_tab, ranking_tab, stock_tab, compare_tab, method_tab = st.tabs(
+    ["市场状态", "分组回测", "股票排名", "个股拆解", "个股比较", "评分方法"]
 )
 
 with overview_tab:
@@ -176,100 +172,110 @@ with overview_tab:
         ).properties(height=max(300, 22 * len(industry_view)))
         st.altair_chart(bars)
 
-with cap_tab:
-    st.subheader("按市值分层看趋势、风险与估值", anchor=False)
+with backtest_tab:
+    st.subheader("过去三年A/B/C分组回测", anchor=False)
     st.caption(
-        f"100亿元接近当前样本中位数，且把310只股票较均衡地分为"
-        f"{(rankings['market_cap_segment'] == '小市值（<100亿）').sum()}只小市值和"
-        f"{(rankings['market_cap_segment'] == '中大市值（≥100亿）').sum()}只中大市值。"
-        "历史检验支持把它作为操作性分界，但没有证据支持忽略小市值风险。"
+        f"{group_backtest_meta['start_entry_date']}至{group_backtest_meta['end_entry_date']}，"
+        f"每{group_backtest_meta['rebalance_sessions']}个交易日形成一次非重叠组合，"
+        f"持有{group_backtest_meta['forward_sessions']}个交易日；每期先对组内股票等权，再跨期平均。"
     )
+    metrics_by_group = group_backtest.set_index("group")
     with st.container(horizontal=True):
-        st.metric("分层阈值", f"{meta['market_cap_threshold_100m']}亿元", border=True)
-        st.metric("小市值", f"{(rankings['market_cap_segment'] == '小市值（<100亿）').sum()}只", border=True)
-        st.metric("中大市值", f"{(rankings['market_cap_segment'] == '中大市值（≥100亿）').sum()}只", border=True)
-        st.metric("当前中位市值", f"{rankings['market_cap_100m'].median():.0f}亿元", border=True)
+        for group in ["A", "B", "C"]:
+            result = metrics_by_group.loc[group]
+            st.metric(
+                f"{group}组平均未来20日收益",
+                pct(result["average_forward_20d_return"]),
+                f"胜率 {result['win_rate']:.1%}",
+                border=True,
+            )
 
-    weight_left, weight_right = st.columns(2, gap="medium")
-    with weight_left.container(border=True):
-        st.markdown("**小市值（<100亿元）**")
-        st.write("分层综合分：趋势50% + 安全度40% + 估值10%")
-        st.caption("小市值风险不能忽略；在强趋势样本中，风险分对未来20日最大回撤的秩相关约为0.216。")
-        small_leaders = rankings[rankings["market_cap_segment"] == "小市值（<100亿）"].nsmallest(
-            10, "market_cap_segment_rank"
+    st.warning(
+        "过去三年样本中，A组的未来20日平均收益没有领先B/C组，且平均区间回撤更大。"
+        "因此A/B/C应理解为当前趋势状态标签，不应直接解释为未来收益评级。",
+        icon=":material/warning:",
+    )
+
+    chart_left, chart_right = st.columns(2, gap="medium")
+    with chart_left.container(border=True):
+        st.markdown("**全样本平均收益与回撤**")
+        backtest_long = group_backtest.melt(
+            id_vars=["group"],
+            value_vars=["average_forward_20d_return", "average_forward_20d_drawdown"],
+            var_name="metric",
+            value_name="value",
         )
-        st.dataframe(
-            small_leaders[["market_cap_segment_rank", "name", "market_cap_100m", "market_cap_adjusted_score", "momentum_score", "risk_score", "valuation_score"]],
-            hide_index=True,
-            height=390,
-            column_config={
-                "market_cap_segment_rank": "层内排名", "name": "股票",
-                "market_cap_100m": st.column_config.NumberColumn("市值(亿)", format="%.0f"),
-                "market_cap_adjusted_score": st.column_config.ProgressColumn("分层综合分", min_value=0, max_value=100, format="%.1f"),
-                "momentum_score": st.column_config.NumberColumn("趋势分", format="%.1f"),
-                "risk_score": st.column_config.NumberColumn("风险分", format="%.1f"),
-                "valuation_score": st.column_config.NumberColumn("估值分", format="%.1f"),
-            },
+        backtest_long["metric"] = backtest_long["metric"].map(
+            {"average_forward_20d_return": "平均收益", "average_forward_20d_drawdown": "平均最大回撤"}
         )
-    with weight_right.container(border=True):
-        st.markdown("**中大市值（≥100亿元）**")
-        st.write("分层综合分：趋势40% + 安全度40% + 估值20%")
-        st.caption("2024年以来估值对后续20日收益的秩相关在中大市值组更高；风险仍与趋势同等权重。")
-        large_leaders = rankings[rankings["market_cap_segment"] == "中大市值（≥100亿）"].nsmallest(
-            10, "market_cap_segment_rank"
-        )
-        st.dataframe(
-            large_leaders[["market_cap_segment_rank", "name", "market_cap_100m", "market_cap_adjusted_score", "momentum_score", "risk_score", "valuation_score"]],
-            hide_index=True,
-            height=390,
-            column_config={
-                "market_cap_segment_rank": "层内排名", "name": "股票",
-                "market_cap_100m": st.column_config.NumberColumn("市值(亿)", format="%.0f"),
-                "market_cap_adjusted_score": st.column_config.ProgressColumn("分层综合分", min_value=0, max_value=100, format="%.1f"),
-                "momentum_score": st.column_config.NumberColumn("趋势分", format="%.1f"),
-                "risk_score": st.column_config.NumberColumn("风险分", format="%.1f"),
-                "valuation_score": st.column_config.NumberColumn("估值分", format="%.1f"),
-            },
-        )
+        result_bars = alt.Chart(backtest_long).mark_bar().encode(
+            x=alt.X("group:N", title="分组", sort=["A", "B", "C"]),
+            y=alt.Y("value:Q", title=None, axis=alt.Axis(format="%")),
+            xOffset="metric:N",
+            color=alt.Color("metric:N", title="指标", scale=alt.Scale(range=["#587A95", "#C8423B"])),
+            tooltip=[
+                alt.Tooltip("group:N", title="分组"),
+                alt.Tooltip("metric:N", title="指标"),
+                alt.Tooltip("value:Q", title="数值", format=".2%"),
+            ],
+        ).properties(height=360)
+        st.altair_chart(result_bars)
+
+    with chart_right.container(border=True):
+        st.markdown("**按进入年份拆分的平均未来20日收益**")
+        yearly_bars = alt.Chart(group_backtest_yearly).mark_bar().encode(
+            x=alt.X("year:O", title="进入年份"),
+            y=alt.Y("average_forward_20d_return:Q", title="平均未来20日收益", axis=alt.Axis(format="%")),
+            xOffset="group:N",
+            color=alt.Color("group:N", title="分组", scale=alt.Scale(domain=list(GROUP_COLORS), range=list(GROUP_COLORS.values()))),
+            tooltip=[
+                alt.Tooltip("year:O", title="年份"),
+                alt.Tooltip("group:N", title="分组"),
+                alt.Tooltip("average_forward_20d_return:Q", title="平均收益", format=".2%"),
+                alt.Tooltip("win_rate:Q", title="组合胜率", format=".1%"),
+                alt.Tooltip("rebalance_count:Q", title="调仓期数"),
+            ],
+        ).properties(height=360)
+        st.altair_chart(yearly_bars)
 
     with st.container(border=True):
-        st.markdown("**阈值敏感性：风险分与未来20日最大回撤的秩相关**")
-        validation_chart = alt.Chart(market_cap_validation).mark_line(point=True, strokeWidth=2.5).encode(
-            x=alt.X("threshold_100m:Q", title="市值阈值（亿元）", scale=alt.Scale(domain=[45, 205])),
-            y=alt.Y("risk_forward_20d_drawdown_rank_ic:Q", title="风险—未来20日最大回撤 Rank IC", scale=alt.Scale(zero=False)),
-            color=alt.Color("segment:N", title="阈值两侧"),
-            tooltip=[
-                alt.Tooltip("threshold_100m:Q", title="阈值（亿元）"),
-                alt.Tooltip("segment:N", title="分组"),
-                alt.Tooltip("observation_count:Q", title="观测数"),
-                alt.Tooltip("risk_forward_20d_drawdown_rank_ic:Q", title="Rank IC", format=".3f"),
-            ],
-        ).properties(height=350)
-        threshold_rule = alt.Chart(pd.DataFrame({"threshold_100m": [100]})).mark_rule(
-            color="#C8423B", strokeDash=[5, 4]
-        ).encode(x="threshold_100m:Q")
-        st.altair_chart(validation_chart + threshold_rule)
-        st.caption("两组风险—回撤关系均为正且较稳定，说明100亿元以下也不能降低风险权重。")
+        st.markdown("**回测明细摘要**")
+        st.dataframe(
+            group_backtest,
+            hide_index=True,
+            column_config={
+                "group": "分组",
+                "average_forward_20d_return": st.column_config.NumberColumn("平均未来20日收益", format="percent"),
+                "median_forward_20d_return": st.column_config.NumberColumn("期度收益中位数", format="percent"),
+                "win_rate": st.column_config.NumberColumn("组合胜率", format="percent"),
+                "average_forward_20d_drawdown": st.column_config.NumberColumn("平均最大回撤", format="percent"),
+                "rebalance_count": "有效调仓期数",
+                "observation_count": "股票观测数",
+                "annual_average_dispersion": st.column_config.NumberColumn("年度均值离散度", format="percent"),
+            },
+        )
+        st.caption(
+            f"最后一个组合于{group_backtest_meta['last_exit_date']}退出，共"
+            f"{group_backtest_meta['rebalance_count']}个调仓日期、{group_backtest_meta['observation_count']:,}个股票观测。"
+        )
 
-    with st.expander("历史验证口径与局限"):
+    with st.expander("回测规则与局限"):
         st.markdown(
             """
-            - 使用当前310只医疗股票的2019年至2026年历史前复权价格、动态总市值、PE_TTM和PB。
-            - 约每20个交易日取一个非重叠截面，共85个观察日期；因子只使用当时可得数据，考察未来20日收益与最大回撤。
-            - 100亿元阈值下约有9,258个小市值观测和12,900个中大市值观测；当前截面两组分别为145只和165只。
-            - 当前股票池会产生幸存者偏差；Rank IC反映截面排序关系，不等同于可实现收益，也没有计入交易成本和涨跌停约束。
+            - 每个历史时点只使用当时及此前价格，按当前完全相同的趋势分、过热分和A/B/C阈值重新分类。
+            - 主结果使用非重叠20日持有期；每个调仓日组内股票等权，不因某个月某组股票较多而获得更高权重。
+            - 未计交易成本、停牌成交限制、涨跌停和冲击成本；当前310只股票池用于全部历史时期，存在幸存者偏差。
+            - A组在部分历史调仓日为空，因此有效期数少于B/C组。结果是历史描述，不构成未来收益承诺。
             """
         )
 
 with ranking_tab:
     st.subheader("股票排名与研究信号", anchor=False)
     st.caption("默认只显示核心字段；需要更多指标时可下载完整筛选结果。")
-    table = filtered[["market_rank", "market_cap_segment_rank", "name", "ts_code", "healthcare_subindustry", "market_cap_segment", "signal_label", "group", "market_cap_adjusted_score", "momentum_score", "valuation_score", "risk_score", "overheat_score", "ret_20d", "ret_60d", "latest_pe_ttm", "latest_pb", "valuation_status", "market_cap_100m"]].copy()
+    table = filtered[["market_rank", "name", "ts_code", "healthcare_subindustry", "signal_label", "group", "momentum_score", "valuation_score", "risk_score", "overheat_score", "ret_20d", "ret_60d", "latest_pe_ttm", "latest_pb", "valuation_status", "market_cap_100m"]].copy()
     st.dataframe(table, hide_index=True, height=650, column_config={
         "market_rank": st.column_config.NumberColumn("趋势排名", pinned=True, format="%d"),
-        "market_cap_segment_rank": st.column_config.NumberColumn("市值层内排名", format="%d"),
-        "name": st.column_config.TextColumn("股票", pinned=True), "ts_code": "代码", "healthcare_subindustry": "子行业", "market_cap_segment": "市值分层", "signal_label": "研究信号", "group": "趋势标签",
-        "market_cap_adjusted_score": st.column_config.ProgressColumn("分层综合分", min_value=0, max_value=100, format="%.1f"),
+        "name": st.column_config.TextColumn("股票", pinned=True), "ts_code": "代码", "healthcare_subindustry": "子行业", "signal_label": "研究信号", "group": "趋势标签",
         "momentum_score": st.column_config.ProgressColumn("趋势强度", min_value=0, max_value=100, format="%.1f"),
         "valuation_score": st.column_config.ProgressColumn("估值分", min_value=0, max_value=100, format="%.1f"),
         "risk_score": st.column_config.ProgressColumn("风险分", min_value=0, max_value=100, format="%.1f"),
@@ -288,10 +294,10 @@ with stock_tab:
         row = rankings.loc[rankings["ts_code"] == selected_code].iloc[0]
         with st.container(horizontal=True):
             st.metric("趋势排名", f"{int(row['market_rank'])} / {len(rankings)}", border=True)
-            st.metric("市值层内排名", f"{int(row['market_cap_segment_rank'])} / {int(row['market_cap_segment_count'])}", border=True)
             st.metric("研究信号", row["signal_label"], border=True)
             st.metric("趋势强度", f"{row['momentum_score']:.1f}", border=True)
-            st.metric("分层综合分", f"{row['market_cap_adjusted_score']:.1f}", border=True)
+            st.metric("估值分", "—" if pd.isna(row["valuation_score"]) else f"{row['valuation_score']:.1f}", border=True)
+            st.metric("风险分", f"{row['risk_score']:.1f}", border=True)
         detail_left, detail_right = st.columns(2, gap="medium")
         with detail_left.container(border=True):
             st.markdown("**评分拆解**")
@@ -301,7 +307,6 @@ with stock_tab:
         with detail_right.container(border=True):
             st.markdown("**数据与比较口径**")
             st.write(f"子行业：{row['healthcare_subindustry']} · 行业内趋势排名 {int(row['subindustry_rank'])}/{int(row['subindustry_count'])}")
-            st.write(f"市值分层：{row['market_cap_segment']} · {row['segment_weight_profile']}")
             st.write(f"价格日期：{row['price_date'].date()} · 估值日期：{row['valuation_as_of_date'].date() if pd.notna(row['valuation_as_of_date']) else '未知'}")
             st.write(f"数据完整度：{row['data_completeness_score']:.0f}/100 · {row['classification_confidence']} 分类置信度")
         horizon = st.segmented_control("走势区间", ["60日", "120日", "250日"], default="120日", required=True)
@@ -331,8 +336,8 @@ with compare_tab:
         comparison = rankings[rankings["ts_code"].isin(comparison_codes)].sort_values("market_rank").copy()
         comparison_table = comparison[
             [
-                "market_rank", "market_cap_segment_rank", "name", "ts_code", "healthcare_subindustry", "market_cap_segment", "group", "signal_label",
-                "market_cap_adjusted_score", "momentum_score", "overheat_score", "valuation_score", "risk_score",
+                "market_rank", "name", "ts_code", "healthcare_subindustry", "group", "signal_label",
+                "momentum_score", "overheat_score", "valuation_score", "risk_score",
                 "ret_5d", "ret_20d", "ret_60d", "ret_120d", "drawdown_60d",
                 "latest_pe_ttm", "latest_pb", "market_cap_100m",
             ]
@@ -344,14 +349,11 @@ with compare_tab:
                 hide_index=True,
                 column_config={
                     "market_rank": st.column_config.NumberColumn("趋势排名", pinned=True, format="%d"),
-                    "market_cap_segment_rank": st.column_config.NumberColumn("市值层内排名", format="%d"),
                     "name": st.column_config.TextColumn("股票", pinned=True),
                     "ts_code": "代码",
                     "healthcare_subindustry": "子行业",
-                    "market_cap_segment": "市值分层",
                     "group": "趋势标签",
                     "signal_label": "研究信号",
-                    "market_cap_adjusted_score": st.column_config.ProgressColumn("分层综合分", min_value=0, max_value=100, format="%.1f"),
                     "momentum_score": st.column_config.ProgressColumn("趋势分", min_value=0, max_value=100, format="%.1f"),
                     "overheat_score": st.column_config.ProgressColumn("过热分", min_value=0, max_value=100, format="%.1f"),
                     "valuation_score": st.column_config.ProgressColumn("估值分", min_value=0, max_value=100, format="%.1f"),
@@ -450,10 +452,9 @@ with method_tab:
         """
         - **趋势强度**：5/20/60/120日收益的全市场与子行业内排名，叠加均线和距高点确认；20日、60日窗口权重最高。
         - **估值分**：PE_TTM和PB只在所属子行业内比较；正PE权重60%，正PB权重40%；负PE或缺失PE不被当作便宜，估值分会因有效字段不足而降权。
-        - **市值分层综合分**：以100亿元为操作性分界。小市值使用趋势50% + 安全度40% + 估值10%；中大市值使用趋势40% + 安全度40% + 估值20%。安全度等于100减风险分；估值缺失时按中性50分处理。
         - **研究信号**：强趋势低过热、强趋势高过热、估值便宜待确认、弱趋势/数据不足。它们是研究优先级，不是买卖评级。
         - **风险分**：追高风险、20日年化波动率和价格数据滞后度的组合；分数越高，风险越高。
-        - **验证结论**：100亿元接近样本中位数，适合做分层展示；但风险对未来回撤在两组均有效，因此没有降低小市值风险权重。趋势分衡量当前趋势状态，不是未来收益预测分。
+        - **A/B/C历史表现**：过去三年非重叠20日回测中，A组未表现出更高的未来收益，因此分组只描述当前趋势确认程度，不构成收益评级。
         - **质量分暂未启用**：当前快照没有ROE、营收增速、扣非利润增速和结构化新闻字段，因此看板不会假装拥有这些信息。
         """
     )

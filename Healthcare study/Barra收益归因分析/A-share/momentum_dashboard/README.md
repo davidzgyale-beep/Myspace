@@ -5,7 +5,6 @@
 ## 本地运行
 
 ```bash
-python -m pip install -r requirements.txt
 streamlit run streamlit_app.py
 ```
 
@@ -19,7 +18,7 @@ python update_prices.py --end-date YYYYMMDD
 python build_snapshot.py
 ```
 
-`update_prices.py` 按交易日批量补充日线与复权因子，并重建前复权宽表；`build_snapshot.py` 随后读取相邻的 `../Full version/universe` 数据，生成部署所需的三个轻量文件：
+`update_prices.py` 按交易日批量补充日线与复权因子，并重建前复权宽表；`build_snapshot.py` 随后读取相邻的 `../Full version/universe` 数据，生成部署所需的轻量文件：
 
 - `data/momentum_snapshot.csv`
 - `data/subindustry_snapshot.csv`
@@ -27,13 +26,19 @@ python build_snapshot.py
 
 应用运行时不会调用 Tushare，也不需要任何密钥。先用原有数据流程更新股票池和前复权行情，再重新运行构建脚本即可更新公开看板。
 
-重新评估市值阈值及趋势、估值、风险的历史关系时运行：
+重新计算过去三年的A/B/C分组回测时运行：
 
 ```bash
-python validate_market_cap_hypothesis.py
+python backtest_groups.py
 ```
 
-该脚本使用历史动态市值和估值数据生成 `data/market_cap_validation.csv`；日常行情更新无需重复运行。
+该脚本生成：
+
+- `data/group_backtest_summary.csv`
+- `data/group_backtest_yearly.csv`
+- `data/group_backtest_metadata.json`
+
+回测使用当前310只股票的历史行情，每20个交易日调仓并持有20个交易日，组内等权。日常行情更新无需重复运行，只有在回测区间或A/B/C规则变化时才需要重跑。
 
 ## Streamlit Community Cloud
 
@@ -50,8 +55,8 @@ python validate_market_cap_hypothesis.py
 
 ## 评分扩展
 
-看板同时提供趋势强度、子行业内估值分、追高风险、研究信号和市值分层综合分。估值分使用正PE_TTM与PB的子行业内相对排名；当前快照没有ROE、盈利增速或结构化新闻，因此质量/新闻分暂不虚构。
+看板同时提供趋势强度、子行业内估值分、追高风险和研究信号。估值分使用正PE_TTM与PB的子行业内相对排名；当前快照没有ROE、盈利增速或结构化新闻，因此质量/新闻分暂不虚构。
 
-市值分层以100亿元为操作性阈值：小市值综合分使用趋势50%、安全度40%、估值10%；中大市值使用趋势40%、安全度40%、估值20%。历史检验显示风险对未来回撤在两组均有效，因此小市值风险权重没有被降低。100亿元接近当前样本中位数，便于形成数量相对均衡的两组，并不代表已证明存在结构断点。
+过去三年非重叠20日回测中，A组没有表现出更高的未来收益，因此A/B/C只描述当前趋势确认程度，不应解释为未来收益评级。回测未计交易成本、停牌成交限制、涨跌停和冲击成本，并使用当前股票池回看历史，存在幸存者偏差。
 
 看板用于研究和监控，不构成投资建议。

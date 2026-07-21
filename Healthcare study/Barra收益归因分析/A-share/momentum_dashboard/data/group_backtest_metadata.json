@@ -1,0 +1,10 @@
+{
+  "start_entry_date": "2023-06-29",
+  "end_entry_date": "2026-06-22",
+  "last_exit_date": "2026-07-20",
+  "forward_sessions": 20,
+  "rebalance_sessions": 20,
+  "rebalance_count": 37,
+  "observation_count": 11167,
+  "universe_note": "使用当前310只股票的历史数据，存在幸存者偏差。"
+}
