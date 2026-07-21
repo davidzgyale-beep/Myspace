@@ -1,9 +1,14 @@
 {
   "as_of_date": "2026-07-20",
-  "generated_at": "2026-07-22T01:29:45.693237+08:00",
+  "generated_at": "2026-07-22T02:28:14.801682+08:00",
   "stock_count": 310,
   "subindustry_count": 22,
   "price_history_start": "2025-01-16",
   "valuation_as_of_date": "2026-07-14",
-  "methodology_version": "1.6.0-fixed-100-point-trend-no-120d"
+  "methodology_version": "1.7.0-trend-risk-market-beta",
+  "market_state_definition": "20日收益率与相对MA60位置共同判断上涨、修复、转弱、下跌",
+  "healthcare_benchmark": "当前310只医疗股票等权日收益指数",
+  "current_market_state": "下跌",
+  "current_healthcare_state": "修复",
+  "current_market_regime": "医疗修复"
 }

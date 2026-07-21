@@ -23,7 +23,11 @@ st.set_page_config(page_title="A股医疗趋势看板", page_icon=":material/que
 def load_snapshot():
     rankings = pd.read_csv(DATA_DIR / "momentum_snapshot.csv", parse_dates=["price_date"])
     history = pd.read_csv(DATA_DIR / "price_history.csv.gz", parse_dates=["trade_date"])
+    market_state_history = pd.read_csv(
+        DATA_DIR / "market_state_history.csv", parse_dates=["trade_date"]
+    )
     two_dimension_backtest = pd.read_csv(DATA_DIR / "two_dimension_backtest.csv")
+    market_regime_backtest = pd.read_csv(DATA_DIR / "market_regime_backtest.csv")
     group_backtest_metadata = json.loads(
         (DATA_DIR / "group_backtest_metadata.json").read_text(encoding="utf-8")
     )
@@ -43,7 +47,9 @@ def load_snapshot():
     return (
         rankings,
         history,
+        market_state_history,
         two_dimension_backtest,
+        market_regime_backtest,
         group_backtest_metadata,
         risk_oos,
         risk_oos_yearly,
@@ -56,6 +62,21 @@ def load_snapshot():
 
 def pct(value: float) -> str:
     return "—" if pd.isna(value) else f"{value:.1%}"
+
+
+def beta_context(row: pd.Series, market_regime: str) -> str:
+    if market_regime == "风险偏好":
+        return (
+            "市场与医疗同步向上，趋势信号优先；Beta用于衡量上涨弹性，"
+            "但高Beta仍意味着更深回撤。"
+        )
+    if market_regime in {"医疗独立行情", "医疗修复"}:
+        return (
+            "医疗相对大盘更强，优先观察医疗Beta；高大盘Beta可能引入额外市场拖累。"
+        )
+    if market_regime == "大盘独涨":
+        return "医疗未确认大盘行情，不宜仅凭高趋势追涨；Beta用于控制错误暴露。"
+    return "防御环境中风险分优先；高Beta股票对大盘或医疗下跌更敏感，宜降低仓位。"
 
 
 def normalized_history(history: pd.DataFrame, codes: list[str], sessions: int) -> pd.DataFrame:
@@ -142,7 +163,9 @@ def apply_industry_batch() -> None:
 (
     raw_rankings,
     history,
+    market_state_history,
     two_dimension_backtest,
+    market_regime_backtest,
     group_backtest_meta,
     risk_oos,
     risk_oos_yearly,
@@ -152,6 +175,7 @@ def apply_industry_batch() -> None:
     meta,
 ) = load_snapshot()
 rankings = apply_simple_labels(raw_rankings, model_scores)
+current_market_state = market_state_history.iloc[-1]
 
 ALL_INDUSTRIES = sorted(rankings["healthcare_subindustry"].dropna().unique().tolist())
 industry_summary = (
@@ -209,6 +233,20 @@ with st.sidebar:
         key="selected_risks",
         selection_mode="multi",
     )
+    selected_market_betas = st.pills(
+        "大盘Beta",
+        ["低Beta", "中Beta", "高Beta"],
+        default=["低Beta", "中Beta", "高Beta"],
+        key="selected_market_betas",
+        selection_mode="multi",
+    )
+    selected_healthcare_betas = st.pills(
+        "医疗Beta",
+        ["低Beta", "中Beta", "高Beta"],
+        default=["低Beta", "中Beta", "高Beta"],
+        key="selected_healthcare_betas",
+        selection_mode="multi",
+    )
     market_cap_max = int(np.ceil(rankings["market_cap_100m"].max() / 100) * 100)
     market_cap_range = st.slider("总市值（亿元）", 0, market_cap_max, (0, market_cap_max), 10)
     search = st.text_input("搜索股票", placeholder="输入名称或代码")
@@ -221,6 +259,8 @@ filtered = rankings[
     rankings["healthcare_subindustry"].isin(st.session_state.get("selected_industries", []))
     & rankings["trend_bucket"].isin(selected_trends or [])
     & rankings["risk_bucket"].isin(selected_risks or [])
+    & rankings["market_beta_bucket"].isin(selected_market_betas or [])
+    & rankings["healthcare_beta_bucket"].isin(selected_healthcare_betas or [])
     & rankings["market_cap_100m"].fillna(0).between(*market_cap_range)
 ].copy()
 if search:
@@ -234,7 +274,7 @@ st.title(":material/query_stats: A股医疗趋势看板")
 st.caption(
     f"覆盖 {meta['stock_count']} 只股票、{meta['subindustry_count']} 个子行业。"
     "趋势分使用理论满分100分的固定公式；"
-    "风险分表示未来20日最大不利波动的相对排名。"
+    "风险分表示未来20日最大不利波动的相对排名；市场状态与Beta作为独立辅助层。"
 )
 
 with st.container(horizontal=True):
@@ -249,6 +289,71 @@ overview_tab, backtest_tab, method_tab, stock_tab, compare_tab = st.tabs(
 )
 
 with overview_tab:
+    st.subheader("大盘与医疗板块状态", anchor=False)
+    with st.container(horizontal=True):
+        st.metric("综合状态", current_market_state["market_regime"], border=True)
+        st.metric(
+            "沪深300",
+            current_market_state["market_state"],
+            pct(current_market_state["market_ret_20d"]),
+            border=True,
+        )
+        st.metric(
+            "医疗等权",
+            current_market_state["healthcare_state"],
+            pct(current_market_state["healthcare_ret_20d"]),
+            border=True,
+        )
+        st.metric(
+            "大盘距MA60",
+            pct(current_market_state["market_ma60_gap"]),
+            border=True,
+        )
+        st.metric(
+            "医疗距MA60",
+            pct(current_market_state["healthcare_ma60_gap"]),
+            border=True,
+        )
+    st.info(
+        beta_context(current_market_state, current_market_state["market_regime"]),
+        icon=":material/strategy:",
+    )
+    state_recent = market_state_history.tail(250).copy()
+    for column in ["market_normalized", "healthcare_normalized"]:
+        state_recent[column] = state_recent[column] / state_recent[column].iloc[0] * 100
+    state_long = state_recent.melt(
+        id_vars=["trade_date"],
+        value_vars=["market_normalized", "healthcare_normalized"],
+        var_name="series",
+        value_name="normalized",
+    )
+    state_long["series"] = state_long["series"].map(
+        {"market_normalized": "沪深300", "healthcare_normalized": "医疗等权"}
+    )
+    with st.container(border=True):
+        state_chart = alt.Chart(state_long).mark_line(strokeWidth=2.2).encode(
+            x=alt.X("trade_date:T", title=None),
+            y=alt.Y("normalized:Q", title="窗口起点=100", scale=alt.Scale(zero=False)),
+            color=alt.Color(
+                "series:N",
+                title=None,
+                scale=alt.Scale(
+                    domain=["沪深300", "医疗等权"],
+                    range=["#587A95", "#C8423B"],
+                ),
+            ),
+            tooltip=[
+                alt.Tooltip("trade_date:T", title="日期"),
+                alt.Tooltip("series:N", title="指数"),
+                alt.Tooltip("normalized:Q", title="标准化", format=".1f"),
+            ],
+        ).properties(height=280).interactive()
+        st.altair_chart(state_chart)
+        st.caption(
+            "上涨：20日收益>0且位于MA60上方；修复：20日收益>0但仍低于MA60；"
+            "转弱：20日收益≤0但仍高于MA60；下跌：两项均不满足。"
+        )
+
     st.subheader("趋势与回撤风险", anchor=False)
     left, right = st.columns([1, 2], gap="medium")
     with left.container(border=True):
@@ -259,7 +364,11 @@ with overview_tab:
         ].nsmallest(12, "market_rank")
         st.dataframe(
             candidates[
-                ["market_rank", "name", "healthcare_subindustry", "momentum_score", "overheat_score"]
+                [
+                    "market_rank", "name", "healthcare_subindustry",
+                    "momentum_score", "overheat_score",
+                    "market_beta_bucket", "healthcare_beta_bucket",
+                ]
             ],
             hide_index=True,
             height=410,
@@ -269,6 +378,8 @@ with overview_tab:
                 "healthcare_subindustry": "子行业",
                 "momentum_score": st.column_config.ProgressColumn("趋势分", min_value=0, max_value=100, format="%.1f"),
                 "overheat_score": st.column_config.ProgressColumn("风险分", min_value=0, max_value=100, format="%.1f"),
+                "market_beta_bucket": "大盘Beta",
+                "healthcare_beta_bucket": "医疗Beta",
             },
         )
     with right.container(border=True):
@@ -338,6 +449,8 @@ with overview_tab:
             [
                 "market_rank", "name", "ts_code", "healthcare_subindustry",
                 "trend_bucket", "risk_bucket", "momentum_score", "overheat_score",
+                "market_beta_60d", "market_beta_bucket",
+                "healthcare_beta_60d", "healthcare_beta_bucket",
                 "ret_5d", "ret_20d", "ret_60d", "ret_120d", "market_cap_100m",
             ]
         ].copy()
@@ -354,6 +467,10 @@ with overview_tab:
                 "risk_bucket": "风险档",
                 "momentum_score": st.column_config.ProgressColumn("趋势分", min_value=0, max_value=100, format="%.1f"),
                 "overheat_score": st.column_config.ProgressColumn("风险分", min_value=0, max_value=100, format="%.1f"),
+                "market_beta_60d": st.column_config.NumberColumn("大盘Beta", format="%.2f"),
+                "market_beta_bucket": "大盘Beta档",
+                "healthcare_beta_60d": st.column_config.NumberColumn("医疗Beta", format="%.2f"),
+                "healthcare_beta_bucket": "医疗Beta档",
                 "ret_5d": st.column_config.NumberColumn("5日", format="percent"),
                 "ret_20d": st.column_config.NumberColumn("20日", format="percent"),
                 "ret_60d": st.column_config.NumberColumn("60日", format="percent"),
@@ -445,6 +562,70 @@ with backtest_tab:
             },
         )
 
+    st.markdown("### 市场状态条件回测")
+    regime_dimension = st.segmented_control(
+        "查看维度",
+        ["趋势", "风险"],
+        default="趋势",
+        required=True,
+        key="regime_dimension",
+    )
+    regime_data = market_regime_backtest[
+        (market_regime_backtest["horizon_sessions"] == matrix_horizon)
+        & (market_regime_backtest["dimension"] == regime_dimension)
+    ].copy()
+    regime_order = ["风险偏好", "医疗独立行情", "大盘独涨", "防御/修复"]
+    bucket_order = trend_order if regime_dimension == "趋势" else risk_order
+    regime_returns = regime_data.pivot(
+        index="market_regime",
+        columns="bucket",
+        values="average_forward_return",
+    ).reindex(index=regime_order, columns=bucket_order)
+    regime_drawdowns = regime_data.pivot(
+        index="market_regime",
+        columns="bucket",
+        values="average_forward_drawdown",
+    ).reindex(index=regime_order, columns=bucket_order)
+    regime_periods = regime_data.pivot(
+        index="market_regime",
+        columns="bucket",
+        values="period_count",
+    ).reindex(index=regime_order, columns=bucket_order)
+    for matrix in [regime_returns, regime_drawdowns, regime_periods]:
+        matrix.index.name = "市场状态"
+        matrix.columns.name = f"{regime_dimension}档"
+    regime_left, regime_right = st.columns(2, gap="medium")
+    with regime_left.container(border=True):
+        st.markdown(f"**不同市场状态：未来{matrix_horizon}日平均收益**")
+        st.dataframe(
+            regime_returns,
+            column_config={
+                bucket: st.column_config.NumberColumn(bucket, format="percent")
+                for bucket in bucket_order
+            },
+        )
+    with regime_right.container(border=True):
+        st.markdown(f"**不同市场状态：未来{matrix_horizon}日平均回撤**")
+        st.dataframe(
+            regime_drawdowns,
+            column_config={
+                bucket: st.column_config.NumberColumn(bucket, format="percent")
+                for bucket in bucket_order
+            },
+        )
+    with st.expander("市场状态样本数"):
+        st.dataframe(
+            regime_periods,
+            column_config={
+                bucket: st.column_config.NumberColumn(bucket, format="%d")
+                for bucket in bucket_order
+            },
+        )
+        st.caption(
+            "状态只使用建仓日前已知的指数数据。医疗等权指数基于当前310只展示股票，"
+            "因此状态回测仍存在展示股票池的幸存者偏差。"
+        )
+
     strong_low = matrix_data[
         (matrix_data["trend_bucket"] == "强趋势")
         & (matrix_data["risk_bucket"] == "低风险")
@@ -483,6 +664,18 @@ with stock_tab:
             st.metric("二维标签", row["two_dimension_label"], border=True)
             st.metric("趋势分", f"{row['momentum_score']:.1f}", border=True)
             st.metric("风险分", f"{row['overheat_score']:.1f}", border=True)
+            st.metric(
+                "大盘Beta",
+                f"{row['market_beta_60d']:.2f}",
+                row["market_beta_bucket"],
+                border=True,
+            )
+            st.metric(
+                "医疗Beta",
+                f"{row['healthcare_beta_60d']:.2f}",
+                row["healthcare_beta_bucket"],
+                border=True,
+            )
 
         detail_left, detail_right = st.columns(2, gap="medium")
         with detail_left.container(border=True):
@@ -505,6 +698,14 @@ with stock_tab:
                 f"子行业：{row['healthcare_subindustry']} · "
                 f"价格日期：{row['price_date'].date()} · "
                 f"模型训练截止：{row['model_training_end'].date()}"
+            )
+        with st.container(border=True):
+            st.markdown("**市场暴露解释**")
+            st.write(beta_context(row, current_market_state["market_regime"]))
+            st.caption(
+                f"当前综合状态：{current_market_state['market_regime']}。"
+                "Beta由过去60个交易日原始收益估算；低/中/高为当日310只股票横截面三分位，"
+                "不参与趋势分、风险分或ABC分组。"
             )
 
         horizon = st.segmented_control(
@@ -545,7 +746,10 @@ with compare_tab:
         comparison_table = comparison[
             [
                 "market_rank", "name", "ts_code", "healthcare_subindustry", "trend_bucket", "risk_bucket",
-                "momentum_score", "overheat_score", "ret_5d", "ret_20d", "ret_60d",
+                "momentum_score", "overheat_score",
+                "market_beta_60d", "market_beta_bucket",
+                "healthcare_beta_60d", "healthcare_beta_bucket",
+                "ret_5d", "ret_20d", "ret_60d",
                 "ret_120d", "market_cap_100m",
             ]
         ]
@@ -563,6 +767,10 @@ with compare_tab:
                     "risk_bucket": "风险档",
                     "momentum_score": st.column_config.ProgressColumn("趋势分", min_value=0, max_value=100, format="%.1f"),
                     "overheat_score": st.column_config.ProgressColumn("风险分", min_value=0, max_value=100, format="%.1f"),
+                    "market_beta_60d": st.column_config.NumberColumn("大盘Beta", format="%.2f"),
+                    "market_beta_bucket": "大盘Beta档",
+                    "healthcare_beta_60d": st.column_config.NumberColumn("医疗Beta", format="%.2f"),
+                    "healthcare_beta_bucket": "医疗Beta档",
                     "ret_5d": st.column_config.NumberColumn("5日", format="percent"),
                     "ret_20d": st.column_config.NumberColumn("20日", format="percent"),
                     "ret_60d": st.column_config.NumberColumn("60日", format="percent"),
@@ -708,6 +916,35 @@ with method_tab:
         st.dataframe(risk_factor_table, hide_index=True, height=285)
         st.write("风险分档：低风险 <30 · 中风险 30–70 · 高风险 ≥70 · 极端过热 ≥90")
 
+    with st.container(border=True):
+        st.markdown("**第三层：市场状态与个股Beta**")
+        st.markdown(
+            """
+            - **市场状态**回答当前更应偏重趋势还是风险：沪深300和医疗等权指数分别用20日收益率与MA60位置判断。
+            - **大盘Beta**表示个股对沪深300的60日历史敏感度；**医疗Beta**表示个股对医疗等权指数的60日历史敏感度。
+            - Beta低/中/高按当日310只股票横截面三分位划分，只用于筛选、仓位和情景解释。
+            - Beta不会进入趋势分、不会额外改变正式MAE风险分，也不会改变ABC分组。
+            """
+        )
+        state_rules = pd.DataFrame(
+            {
+                "综合状态": ["风险偏好", "医疗独立行情", "大盘独涨", "医疗修复/防御"],
+                "条件": [
+                    "大盘与医疗同步上涨",
+                    "医疗上涨、大盘未确认",
+                    "大盘上涨、医疗未确认",
+                    "医疗修复或两者均未确认",
+                ],
+                "使用重点": [
+                    "趋势优先，排除极端风险",
+                    "趋势可用，重点观察医疗Beta",
+                    "谨慎追逐医疗个股趋势",
+                    "风险与Beta优先，控制仓位",
+                ],
+            }
+        )
+        st.dataframe(state_rules, hide_index=True)
+
     st.markdown("### 回撤模型验证")
     selected_result = risk_oos.iloc[0]
     with st.container(horizontal=True):
@@ -756,7 +993,8 @@ with method_tab:
             """
         )
     st.info(
-        "趋势分和风险分是两个独立维度：趋势分用于排研究优先级，风险分用于评估回撤与仓位，不应合并解释为买入概率。"
+        "三层信息独立使用：趋势分排研究优先级，风险分评估MAE，"
+        "市场状态与Beta决定当前更应偏重趋势还是风险；它们不合并解释为买入概率。"
     )
     st.warning(
         f"价格截至 {meta['as_of_date']}。看板用于研究和监控，不构成投资建议。",

@@ -105,6 +105,93 @@ def classify_two_dimensions(frame: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+def market_regime_history(
+    prices: pd.DataFrame,
+    benchmark_close: pd.Series,
+) -> pd.DataFrame:
+    healthcare_returns = prices.pct_change(fill_method=None).mean(axis=1, skipna=True)
+    healthcare_close = (1 + healthcare_returns.fillna(0)).cumprod()
+    state = pd.DataFrame(
+        {
+            "market_close": benchmark_close.reindex(prices.index).ffill(),
+            "healthcare_close": healthcare_close,
+        },
+        index=prices.index,
+    )
+    for prefix in ["market", "healthcare"]:
+        state[f"{prefix}_ret_20d"] = (
+            state[f"{prefix}_close"] / state[f"{prefix}_close"].shift(20) - 1
+        )
+        state[f"{prefix}_ma60_gap"] = (
+            state[f"{prefix}_close"]
+            / state[f"{prefix}_close"].rolling(60).mean()
+            - 1
+        )
+        state[f"{prefix}_up"] = (
+            (state[f"{prefix}_ret_20d"] > 0)
+            & (state[f"{prefix}_ma60_gap"] > 0)
+        )
+    state["market_regime"] = np.select(
+        [
+            state["market_up"] & state["healthcare_up"],
+            ~state["market_up"] & state["healthcare_up"],
+            state["market_up"] & ~state["healthcare_up"],
+        ],
+        ["风险偏好", "医疗独立行情", "大盘独涨"],
+        default="防御/修复",
+    )
+    state.index.name = "entry_date"
+    return state
+
+
+def market_regime_summary(
+    detail: pd.DataFrame,
+    regimes: pd.DataFrame,
+) -> pd.DataFrame:
+    classified = classify_two_dimensions(detail).merge(
+        regimes[["market_regime"]],
+        left_on="entry_date",
+        right_index=True,
+        how="left",
+    )
+    rows = []
+    for dimension, bucket_column in [
+        ("趋势", "trend_bucket"),
+        ("风险", "risk_bucket"),
+    ]:
+        period = (
+            classified.groupby(
+                ["horizon_sessions", "entry_date", "market_regime", bucket_column],
+                observed=True,
+                as_index=False,
+            )
+            .agg(
+                average_forward_return=("forward_return", "mean"),
+                average_forward_drawdown=("forward_drawdown", "mean"),
+                stock_count=("ts_code", "count"),
+            )
+        )
+        summary = (
+            period.groupby(
+                ["horizon_sessions", "market_regime", bucket_column],
+                observed=True,
+                as_index=False,
+            )
+            .agg(
+                average_forward_return=("average_forward_return", "mean"),
+                median_period_return=("average_forward_return", "median"),
+                win_rate=("average_forward_return", lambda values: (values > 0).mean()),
+                average_forward_drawdown=("average_forward_drawdown", "mean"),
+                average_stock_count=("stock_count", "mean"),
+                period_count=("entry_date", "nunique"),
+            )
+            .rename(columns={bucket_column: "bucket"})
+        )
+        summary.insert(2, "dimension", dimension)
+        rows.append(summary)
+    return pd.concat(rows, ignore_index=True)
+
+
 def two_dimension_summary(detail: pd.DataFrame, horizon: int) -> pd.DataFrame:
     classified = classify_two_dimensions(detail)
     period = (
@@ -362,7 +449,15 @@ def backtest_horizon(
 
 def build_backtest(
     source_dir: Path,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, dict]:
+) -> tuple[
+    pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
+    dict,
+]:
     universe, close, panels, benchmark_close = load_panels(source_dir)
     raw_prices = close.copy()
     prices = close.ffill(limit=3)
@@ -402,14 +497,19 @@ def build_backtest(
         ],
         ignore_index=True,
     )
+    regime_backtest = market_regime_summary(
+        detail,
+        market_regime_history(prices, benchmark_close),
+    )
     metadata = {
-        "methodology_version": "fixed_100_point_no_120d_trend_plus_survivorship_free_7factor_mae_risk_v5",
+        "methodology_version": "trend_risk_market_regime_beta_v6",
         "lookback_years": LOOKBACK_YEARS,
         "risk_model_horizon": RISK_MODEL_HORIZON,
         "risk_model": "动态申万历史7因子-Ridge",
         "risk_training_rule": "每个建仓日仅使用该日前已完成20日持有期的动态申万医疗历史成员样本滚动重训",
         "risk_target_definition": "max(0, -min(未来持有期收益路径))；价格从未跌破建仓价时记为0",
         "trend_score_definition": "固定理论满分100分；5/20/60日收益率分别贡献10/45/35分（其中全市场排名合计65分、子行业排名合计25分），MA20与60日高点位置各5分；120日收益率不参与评分",
+        "market_regime_definition": "大盘与当前310只医疗股票等权指数分别以20日收益率>0且位于MA60上方定义向上，再组合为风险偏好、医疗独立行情、大盘独涨、防御/修复",
         "overheat_definition": "20日最大不利波动（MAE）风险预测横截面百分位不低于90",
         "group_rules": {
             "A": "趋势分>=70且过热分<90",
@@ -423,16 +523,22 @@ def build_backtest(
         },
         "universe_note": "风险模型训练使用调仓日有效的申万医药生物历史成员，包含退市及被剔除股票；收益矩阵的展示股票仍为当前310只广义医疗股票。",
     }
-    return summary, yearly, spreads, detail, two_dimensions, metadata
+    return summary, yearly, spreads, detail, two_dimensions, regime_backtest, metadata
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--source-dir", type=Path, default=DEFAULT_SOURCE_DIR)
     args = parser.parse_args()
-    summary_frame, yearly_frame, spreads_frame, detail_frame, two_dimensions_frame, meta = build_backtest(
-        args.source_dir.resolve()
-    )
+    (
+        summary_frame,
+        yearly_frame,
+        spreads_frame,
+        detail_frame,
+        two_dimensions_frame,
+        regime_backtest_frame,
+        meta,
+    ) = build_backtest(args.source_dir.resolve())
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     summary_frame.to_csv(DATA_DIR / "group_backtest_summary.csv", index=False, encoding="utf-8-sig")
     yearly_frame.to_csv(DATA_DIR / "group_backtest_yearly.csv", index=False, encoding="utf-8-sig")
@@ -442,6 +548,9 @@ if __name__ == "__main__":
     )
     two_dimensions_frame.to_csv(
         DATA_DIR / "two_dimension_backtest.csv", index=False, encoding="utf-8-sig"
+    )
+    regime_backtest_frame.to_csv(
+        DATA_DIR / "market_regime_backtest.csv", index=False, encoding="utf-8-sig"
     )
     (DATA_DIR / "group_backtest_metadata.json").write_text(
         json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"

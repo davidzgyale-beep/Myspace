@@ -22,6 +22,51 @@ def percentile(series: pd.Series) -> pd.Series:
     return series.rank(method="average", pct=True, na_option="keep")
 
 
+def directional_state(ret_20d: pd.Series, ma60_gap: pd.Series) -> pd.Series:
+    return pd.Series(
+        np.select(
+            [
+                (ret_20d > 0) & (ma60_gap > 0),
+                (ret_20d > 0) & (ma60_gap <= 0),
+                (ret_20d <= 0) & (ma60_gap > 0),
+            ],
+            ["上涨", "修复", "转弱"],
+            default="下跌",
+        ),
+        index=ret_20d.index,
+        dtype="string",
+    )
+
+
+def combined_market_regime(frame: pd.DataFrame) -> pd.Series:
+    market_up = frame["market_state"] == "上涨"
+    healthcare_up = frame["healthcare_state"] == "上涨"
+    healthcare_repair = frame["healthcare_state"] == "修复"
+    return pd.Series(
+        np.select(
+            [
+                market_up & healthcare_up,
+                ~market_up & healthcare_up,
+                market_up & ~healthcare_up,
+                ~market_up & healthcare_repair,
+            ],
+            ["风险偏好", "医疗独立行情", "大盘独涨", "医疗修复"],
+            default="防御状态",
+        ),
+        index=frame.index,
+        dtype="string",
+    )
+
+
+def beta_bucket(percentiles: pd.Series) -> pd.Series:
+    return pd.cut(
+        percentiles,
+        [-np.inf, 1 / 3, 2 / 3, np.inf],
+        labels=["低Beta", "中Beta", "高Beta"],
+        right=True,
+    ).astype("string")
+
+
 def positive_subindustry_percentile(frame: pd.DataFrame, column: str) -> pd.Series:
     """Rank positive valuation observations within each healthcare subindustry."""
     valid = frame[column].where(frame[column] > 0)
@@ -95,6 +140,27 @@ def build_snapshot(source_dir: Path) -> None:
     metrics["above_ma60"] = close > ma60
     daily_returns = latest.pct_change(fill_method=None)
     metrics["volatility_20d"] = daily_returns.tail(20).std() * np.sqrt(252)
+
+    benchmark = pd.read_csv(DATA_DIR / "market_benchmark.csv", parse_dates=["trade_date"])
+    market_close = pd.to_numeric(
+        benchmark.set_index("trade_date")["close"], errors="coerce"
+    ).reindex(latest.index).ffill()
+    market_returns = market_close.pct_change(fill_method=None)
+    healthcare_returns = daily_returns.mean(axis=1, skipna=True)
+    healthcare_close = (1 + healthcare_returns.fillna(0)).cumprod()
+    trailing_stock_returns = daily_returns.tail(60)
+    trailing_market_returns = market_returns.reindex(trailing_stock_returns.index)
+    trailing_healthcare_returns = healthcare_returns.reindex(trailing_stock_returns.index)
+    metrics["market_beta_60d"] = trailing_stock_returns.apply(
+        lambda values: values.cov(trailing_market_returns)
+    ).div(trailing_market_returns.var())
+    metrics["healthcare_beta_60d"] = trailing_stock_returns.apply(
+        lambda values: values.cov(trailing_healthcare_returns)
+    ).div(trailing_healthcare_returns.var())
+    metrics["market_beta_percentile"] = percentile(metrics["market_beta_60d"])
+    metrics["healthcare_beta_percentile"] = percentile(metrics["healthcare_beta_60d"])
+    metrics["market_beta_bucket"] = beta_bucket(metrics["market_beta_percentile"])
+    metrics["healthcare_beta_bucket"] = beta_bucket(metrics["healthcare_beta_percentile"])
     metrics = metrics.reset_index()
 
     keep = [
@@ -193,6 +259,42 @@ def build_snapshot(source_dir: Path) -> None:
     history = prices.loc[history_start:].stack(future_stack=True).rename("close_qfq").dropna().reset_index()
     history.columns = ["trade_date", "ts_code", "close_qfq"]
 
+    state_history = pd.DataFrame(
+        {
+            "trade_date": latest.index,
+            "market_close": market_close.to_numpy(),
+            "healthcare_close": healthcare_close.to_numpy(),
+        }
+    ).dropna(subset=["market_close", "healthcare_close"])
+    for prefix in ["market", "healthcare"]:
+        state_history[f"{prefix}_ret_20d"] = (
+            state_history[f"{prefix}_close"]
+            / state_history[f"{prefix}_close"].shift(20)
+            - 1
+        )
+        state_history[f"{prefix}_ret_60d"] = (
+            state_history[f"{prefix}_close"]
+            / state_history[f"{prefix}_close"].shift(60)
+            - 1
+        )
+        state_history[f"{prefix}_ma60_gap"] = (
+            state_history[f"{prefix}_close"]
+            / state_history[f"{prefix}_close"].rolling(60).mean()
+            - 1
+        )
+        state_history[f"{prefix}_state"] = directional_state(
+            state_history[f"{prefix}_ret_20d"],
+            state_history[f"{prefix}_ma60_gap"],
+        )
+        state_history[f"{prefix}_normalized"] = (
+            state_history[f"{prefix}_close"]
+            / state_history[f"{prefix}_close"].iloc[0]
+            * 100
+        )
+    state_history["market_regime"] = combined_market_regime(state_history)
+    state_history = state_history[state_history["trade_date"] >= history_start].copy()
+    current_state = state_history.iloc[-1]
+
     breadth = metrics.groupby("healthcare_subindustry", as_index=False).agg(
         stock_count=("ts_code", "count"),
         median_momentum=("momentum_score", "median"),
@@ -210,6 +312,9 @@ def build_snapshot(source_dir: Path) -> None:
     metrics.to_csv(DATA_DIR / "momentum_snapshot.csv", index=False, encoding="utf-8-sig")
     history.to_csv(DATA_DIR / "price_history.csv.gz", index=False, compression="gzip")
     breadth.to_csv(DATA_DIR / "subindustry_snapshot.csv", index=False, encoding="utf-8-sig")
+    state_history.to_csv(
+        DATA_DIR / "market_state_history.csv", index=False, encoding="utf-8-sig"
+    )
     metadata = {
         "as_of_date": latest_date.strftime("%Y-%m-%d"),
         "generated_at": pd.Timestamp.now(tz="Asia/Shanghai").isoformat(),
@@ -217,7 +322,12 @@ def build_snapshot(source_dir: Path) -> None:
         "subindustry_count": int(metrics["healthcare_subindustry"].nunique()),
         "price_history_start": history["trade_date"].min().strftime("%Y-%m-%d"),
         "valuation_as_of_date": valuation_date.strftime("%Y-%m-%d") if pd.notna(valuation_date) else None,
-        "methodology_version": "1.6.0-fixed-100-point-trend-no-120d",
+        "methodology_version": "1.7.0-trend-risk-market-beta",
+        "market_state_definition": "20日收益率与相对MA60位置共同判断上涨、修复、转弱、下跌",
+        "healthcare_benchmark": "当前310只医疗股票等权日收益指数",
+        "current_market_state": current_state["market_state"],
+        "current_healthcare_state": current_state["healthcare_state"],
+        "current_market_regime": current_state["market_regime"],
     }
     (DATA_DIR / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"Built dashboard snapshot for {len(metrics)} stocks as of {metadata['as_of_date']}")
