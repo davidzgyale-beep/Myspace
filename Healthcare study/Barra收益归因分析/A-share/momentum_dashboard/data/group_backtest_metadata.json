@@ -1,11 +1,11 @@
 {
-  "methodology_version": "fixed_100_point_trend_plus_survivorship_free_7factor_mae_risk_v4",
+  "methodology_version": "fixed_100_point_no_120d_trend_plus_survivorship_free_7factor_mae_risk_v5",
   "lookback_years": 3,
   "risk_model_horizon": 20,
   "risk_model": "动态申万历史7因子-Ridge",
   "risk_training_rule": "每个建仓日仅使用该日前已完成20日持有期的动态申万医疗历史成员样本滚动重训",
   "risk_target_definition": "max(0, -min(未来持有期收益路径))；价格从未跌破建仓价时记为0",
-  "trend_score_definition": "固定理论满分100分；5/20/60/120日收益率分别贡献10/30/35/15分（其中全市场排名合计65分、子行业排名合计25分），MA20与60日高点位置各5分",
+  "trend_score_definition": "固定理论满分100分；5/20/60日收益率分别贡献10/45/35分（其中全市场排名合计65分、子行业排名合计25分），MA20与60日高点位置各5分；120日收益率不参与评分",
   "overheat_definition": "20日最大不利波动（MAE）风险预测横截面百分位不低于90",
   "group_rules": {
     "A": "趋势分>=70且过热分<90",
