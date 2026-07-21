@@ -1,5 +1,17 @@
 {
+  "methodology_version": "simplified_trend_plus_20d_enhanced_drawdown_risk_v1",
   "lookback_years": 3,
+  "risk_model_horizon": 20,
+  "risk_model": "增强回撤模型",
+  "risk_training_rule": "每个建仓日只使用该日前已完成20日持有期的样本滚动重训",
+  "overheat_definition": "20日回撤风险预测横截面百分位不低于90",
+  "group_rules": {
+    "A": "趋势分>=70且过热分<90",
+    "B": "趋势分>=40但不满足A",
+    "C": "趋势分<40"
+  },
+  "execution": "建仓日收盘形成信号并按该收盘价成交",
+  "weighting": "每期组内等权，再对各调仓期等权平均",
   "horizons": {
     "5": {
       "start_entry_date": "2023-07-13",
@@ -8,7 +20,7 @@
       "forward_sessions": 5,
       "rebalance_sessions": 5,
       "rebalance_count": 146,
-      "observation_count": 44090
+      "observation_count": 44082
     },
     "20": {
       "start_entry_date": "2023-06-29",
@@ -17,7 +29,7 @@
       "forward_sessions": 20,
       "rebalance_sessions": 20,
       "rebalance_count": 37,
-      "observation_count": 11167
+      "observation_count": 11161
     },
     "120": {
       "start_entry_date": "2023-02-01",
@@ -26,7 +38,7 @@
       "forward_sessions": 120,
       "rebalance_sessions": 120,
       "rebalance_count": 7,
-      "observation_count": 2098
+      "observation_count": 2096
     }
   },
   "universe_note": "使用当前310只股票的历史数据，存在幸存者偏差。"

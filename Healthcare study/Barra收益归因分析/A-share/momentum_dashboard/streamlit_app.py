@@ -13,23 +13,20 @@ import streamlit as st
 
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = APP_DIR / "data"
-GROUP_COLORS = {"A": "#D94B4B", "B": "#D89B2B", "C": "#7A8793"}
+RISK_HORIZON = 20
+OVERHEAT_THRESHOLD = 90
 
-st.set_page_config(page_title="A股医疗研究看板", page_icon=":material/query_stats:", layout="wide")
+st.set_page_config(page_title="A股医疗趋势看板", page_icon=":material/query_stats:", layout="wide")
 
 
 @st.cache_data(show_spinner="正在载入研究快照…")
 def load_snapshot():
-    rankings = pd.read_csv(DATA_DIR / "momentum_snapshot.csv", parse_dates=["price_date", "valuation_as_of_date"])
+    rankings = pd.read_csv(DATA_DIR / "momentum_snapshot.csv", parse_dates=["price_date"])
     history = pd.read_csv(DATA_DIR / "price_history.csv.gz", parse_dates=["trade_date"])
-    industries = pd.read_csv(DATA_DIR / "subindustry_snapshot.csv")
-    group_backtest = pd.read_csv(DATA_DIR / "group_backtest_summary.csv")
-    group_backtest_yearly = pd.read_csv(DATA_DIR / "group_backtest_yearly.csv")
+    two_dimension_backtest = pd.read_csv(DATA_DIR / "two_dimension_backtest.csv")
     group_backtest_metadata = json.loads(
         (DATA_DIR / "group_backtest_metadata.json").read_text(encoding="utf-8")
     )
-    factor_research = pd.read_csv(DATA_DIR / "factor_research_summary.csv")
-    factor_deciles = pd.read_csv(DATA_DIR / "factor_decile_returns.csv")
     model_oos = pd.read_csv(DATA_DIR / "model_oos_summary.csv")
     model_oos_yearly = pd.read_csv(DATA_DIR / "model_oos_yearly.csv")
     model_scores = pd.read_csv(DATA_DIR / "model_current_scores.csv", parse_dates=["model_training_end"])
@@ -39,9 +36,16 @@ def load_snapshot():
     )
     metadata = json.loads((DATA_DIR / "metadata.json").read_text(encoding="utf-8"))
     return (
-        rankings, history, industries, group_backtest, group_backtest_yearly, group_backtest_metadata,
-        factor_research, factor_deciles, model_oos, model_oos_yearly, model_scores, risk_model_selection,
-        factor_research_metadata, metadata,
+        rankings,
+        history,
+        two_dimension_backtest,
+        group_backtest_metadata,
+        model_oos,
+        model_oos_yearly,
+        model_scores,
+        risk_model_selection,
+        factor_research_metadata,
+        metadata,
     )
 
 
@@ -51,9 +55,62 @@ def pct(value: float) -> str:
 
 def normalized_history(history: pd.DataFrame, codes: list[str], sessions: int) -> pd.DataFrame:
     selected = history[history["ts_code"].isin(codes)].copy()
-    selected = selected.sort_values(["ts_code", "trade_date"]).groupby("ts_code", as_index=False).tail(sessions)
-    selected["normalized"] = selected.groupby("ts_code")["close_qfq"].transform(lambda s: s / s.iloc[0] * 100)
+    selected = (
+        selected.sort_values(["ts_code", "trade_date"])
+        .groupby("ts_code", as_index=False)
+        .tail(sessions)
+    )
+    selected["normalized"] = selected.groupby("ts_code")["close_qfq"].transform(
+        lambda series: series / series.iloc[0] * 100
+    )
     return selected
+
+
+def apply_simple_labels(rankings: pd.DataFrame, model_scores: pd.DataFrame) -> pd.DataFrame:
+    """Use the official 20-day drawdown model as the dashboard's only risk signal."""
+    risk = model_scores.loc[
+        model_scores["horizon_sessions"] == RISK_HORIZON,
+        ["ts_code", "drawdown_risk_score", "risk_model_version", "model_training_end"],
+    ].copy()
+    if risk["ts_code"].duplicated().any():
+        raise ValueError("20-day drawdown model contains duplicate stock codes")
+
+    result = rankings.drop(
+        columns=["group", "signal_label", "overheat_score"], errors="ignore"
+    ).merge(risk, on="ts_code", how="left", validate="one_to_one")
+    if result["drawdown_risk_score"].isna().any():
+        missing = result.loc[result["drawdown_risk_score"].isna(), "ts_code"].tolist()
+        raise ValueError(f"20-day drawdown risk score missing for {len(missing)} stocks: {missing[:5]}")
+
+    result["overheat_score"] = result["drawdown_risk_score"]
+    strong = result["momentum_score"] >= 70
+    medium = result["momentum_score"] >= 40
+    overheated = result["overheat_score"] >= OVERHEAT_THRESHOLD
+    result["group"] = np.select(
+        [strong & ~overheated, medium],
+        ["A", "B"],
+        default="C",
+    )
+    result["signal_label"] = np.select(
+        [strong & ~overheated, strong & overheated, medium],
+        ["强趋势/风险可控", "强趋势/过热", "中等趋势"],
+        default="弱趋势",
+    )
+    result["trend_bucket"] = pd.cut(
+        result["momentum_score"],
+        [-np.inf, 40, 70, np.inf],
+        labels=["弱趋势", "中趋势", "强趋势"],
+        right=False,
+    ).astype("string")
+    result["risk_bucket"] = pd.cut(
+        result["overheat_score"],
+        [-np.inf, 30, 70, np.inf],
+        labels=["低风险", "中风险", "高风险"],
+        right=False,
+    ).astype("string")
+    result["two_dimension_label"] = result["trend_bucket"] + " + " + result["risk_bucket"]
+    result["overheat_state"] = np.where(overheated, "过热", "未过热")
+    return result
 
 
 def set_all_industries() -> None:
@@ -65,7 +122,9 @@ def clear_industries() -> None:
 
 
 def apply_preset() -> None:
-    st.session_state["selected_industries"] = list(INDUSTRY_PRESETS[st.session_state["industry_preset"]])
+    st.session_state["selected_industries"] = list(
+        INDUSTRY_PRESETS[st.session_state["industry_preset"]]
+    )
 
 
 def apply_industry_batch() -> None:
@@ -76,12 +135,33 @@ def apply_industry_batch() -> None:
 
 
 (
-    rankings, history, industries, group_backtest, group_backtest_yearly, group_backtest_meta,
-    factor_research, factor_deciles, model_oos, model_oos_yearly, model_scores, risk_model_selection,
-    factor_research_meta, meta,
+    raw_rankings,
+    history,
+    two_dimension_backtest,
+    group_backtest_meta,
+    model_oos,
+    model_oos_yearly,
+    model_scores,
+    risk_model_selection,
+    factor_research_meta,
+    meta,
 ) = load_snapshot()
+rankings = apply_simple_labels(raw_rankings, model_scores)
+
 ALL_INDUSTRIES = sorted(rankings["healthcare_subindustry"].dropna().unique().tolist())
-top_industries = industries.sort_values("median_momentum", ascending=False)["healthcare_subindustry"].head(7).tolist()
+industry_summary = (
+    rankings.groupby("healthcare_subindustry", as_index=False)
+    .agg(
+        stock_count=("ts_code", "count"),
+        median_momentum=("momentum_score", "median"),
+        median_overheat=("overheat_score", "median"),
+        high_risk_count=("risk_bucket", lambda values: (values == "高风险").sum()),
+        strong_trend_count=("trend_bucket", lambda values: (values == "强趋势").sum()),
+    )
+)
+top_industries = (
+    industry_summary.nlargest(7, "median_momentum")["healthcare_subindustry"].tolist()
+)
 INDUSTRY_PRESETS = {
     "全部子行业": ALL_INDUSTRIES,
     "趋势领先前7": top_industries,
@@ -104,27 +184,39 @@ with st.sidebar:
     st.multiselect("已选子行业", ALL_INDUSTRIES, key="selected_industries", placeholder="选择子行业")
     with st.form("industry_batch_form", border=True):
         current = set(st.session_state.get("selected_industries", []))
-        add_options = [x for x in ALL_INDUSTRIES if x not in current]
+        add_options = [industry for industry in ALL_INDUSTRIES if industry not in current]
         remove_options = sorted(current)
         st.multiselect("批量加入", add_options, key="industry_add", placeholder="可多选")
         st.multiselect("批量删除", remove_options, key="industry_remove", placeholder="可多选")
         st.form_submit_button("应用批量修改", on_click=apply_industry_batch, icon=":material/tune:")
 
-    selected_groups = st.pills("股票标签", ["A", "B", "C"], default=["A", "B", "C"], key="selected_groups", selection_mode="multi")
+    selected_trends = st.pills(
+        "趋势档",
+        ["强趋势", "中趋势", "弱趋势"],
+        default=["强趋势", "中趋势", "弱趋势"],
+        key="selected_trends",
+        selection_mode="multi",
+    )
+    selected_risks = st.pills(
+        "风险档",
+        ["低风险", "中风险", "高风险"],
+        default=["低风险", "中风险", "高风险"],
+        key="selected_risks",
+        selection_mode="multi",
+    )
     market_cap_max = int(np.ceil(rankings["market_cap_100m"].max() / 100) * 100)
     market_cap_range = st.slider("总市值（亿元）", 0, market_cap_max, (0, market_cap_max), 10)
-    signal_choices = ["全部信号", "强趋势低过热", "强趋势高过热", "估值便宜待确认", "弱趋势/数据不足"]
-    signal_filter = st.selectbox("研究信号", signal_choices)
     search = st.text_input("搜索股票", placeholder="输入名称或代码")
-    st.caption(f"行情截止 {meta['as_of_date']} · 估值截止 {meta.get('valuation_as_of_date', '未知')} · 方法 {meta['methodology_version']}")
+    st.caption(
+        f"行情截止 {meta['as_of_date']} · 过热口径 {RISK_HORIZON}日回撤风险模型"
+    )
 
 filtered = rankings[
     rankings["healthcare_subindustry"].isin(st.session_state.get("selected_industries", []))
-    & rankings["group"].isin(selected_groups or [])
+    & rankings["trend_bucket"].isin(selected_trends or [])
+    & rankings["risk_bucket"].isin(selected_risks or [])
     & rankings["market_cap_100m"].fillna(0).between(*market_cap_range)
 ].copy()
-if signal_filter != "全部信号":
-    filtered = filtered[filtered["signal_label"] == signal_filter]
 if search:
     term = search.strip().lower()
     filtered = filtered[
@@ -132,355 +224,247 @@ if search:
         | filtered["ts_code"].str.lower().str.contains(term, regex=False)
     ]
 
-st.title(":material/query_stats: A股医疗研究看板")
+st.title(":material/query_stats: A股医疗趋势看板")
 st.caption(
     f"覆盖 {meta['stock_count']} 只股票、{meta['subindustry_count']} 个子行业。"
-    "趋势强度回答‘涨得是否强’，估值分回答‘相对是否便宜’，追高风险回答‘现在是否拥挤’。"
+    "只保留两个判断维度：趋势分表示相对强弱，20日回撤风险分直接用作过热分。"
 )
 
 with st.container(horizontal=True):
     st.metric("当前样本", f"{len(filtered)} 只", border=True)
-    st.metric("强趋势低过热", f"{(filtered['signal_label'] == '强趋势低过热').sum()} 只", border=True)
-    st.metric("估值便宜待确认", f"{(filtered['signal_label'] == '估值便宜待确认').sum()} 只", border=True)
-    st.metric("20日收益中位数", pct(filtered["ret_20d"].median()), border=True)
-    st.metric("高追高风险", f"{(filtered['overheat_score'] >= 90).sum()} 只", border=True)
+    st.metric("强趋势", f"{(filtered['trend_bucket'] == '强趋势').sum()} 只", border=True)
+    st.metric("低风险", f"{(filtered['risk_bucket'] == '低风险').sum()} 只", border=True)
+    st.metric("趋势分中位数", f"{filtered['momentum_score'].median():.1f}", border=True)
+    st.metric("风险分中位数", f"{filtered['overheat_score'].median():.1f}", border=True)
 
-overview_tab, backtest_tab, factor_tab, model_tab, ranking_tab, stock_tab, compare_tab, method_tab = st.tabs(
-    ["市场状态", "分组回测", "因子检验", "样本外模型", "股票排名", "个股拆解", "个股比较", "评分方法"]
+overview_tab, backtest_tab, method_tab, stock_tab, compare_tab = st.tabs(
+    ["市场状态", "回测结果", "评分方法", "个股拆解", "个股比较"]
 )
 
 with overview_tab:
-    st.subheader("先看结论", anchor=False)
-    col1, col2 = st.columns(2, gap="medium")
-    with col1.container(border=True):
-        st.markdown("**强趋势、追高风险相对可控**")
-        candidates = filtered[filtered["signal_label"] == "强趋势低过热"].nsmallest(10, "market_rank")
-        st.dataframe(candidates[["market_rank", "name", "healthcare_subindustry", "momentum_score", "valuation_score", "risk_score"]], hide_index=True, height=300)
-    with col2.container(border=True):
-        st.markdown("**估值便宜，但趋势尚未确认**")
-        value_watch = filtered[filtered["signal_label"] == "估值便宜待确认"].nlargest(10, "valuation_score")
-        st.dataframe(value_watch[["name", "healthcare_subindustry", "valuation_score", "momentum_score", "ret_20d", "valuation_status"]], hide_index=True, height=300)
-
-    with st.container(border=True):
-        st.subheader("趋势强度与追高风险", anchor=False)
-        scatter_base = alt.Chart(filtered).mark_circle(opacity=0.8, stroke="white", strokeWidth=0.5).encode(
-            x=alt.X("momentum_score:Q", title="趋势强度", scale=alt.Scale(domain=[0, 100])),
-            y=alt.Y("overheat_score:Q", title="追高风险", scale=alt.Scale(domain=[0, 100])),
+    st.subheader("趋势与回撤风险", anchor=False)
+    left, right = st.columns([1, 2], gap="medium")
+    with left.container(border=True):
+        st.markdown("**强趋势 + 低风险**")
+        candidates = filtered[
+            (filtered["trend_bucket"] == "强趋势")
+            & (filtered["risk_bucket"] == "低风险")
+        ].nsmallest(12, "market_rank")
+        st.dataframe(
+            candidates[
+                ["market_rank", "name", "healthcare_subindustry", "momentum_score", "overheat_score"]
+            ],
+            hide_index=True,
+            height=410,
+            column_config={
+                "market_rank": "排名",
+                "name": st.column_config.TextColumn("股票", pinned=True),
+                "healthcare_subindustry": "子行业",
+                "momentum_score": st.column_config.ProgressColumn("趋势分", min_value=0, max_value=100, format="%.1f"),
+                "overheat_score": st.column_config.ProgressColumn("风险分", min_value=0, max_value=100, format="%.1f"),
+            },
+        )
+    with right.container(border=True):
+        scatter = alt.Chart(filtered).mark_circle(opacity=0.8, stroke="white", strokeWidth=0.5).encode(
+            x=alt.X("momentum_score:Q", title="趋势分", scale=alt.Scale(domain=[0, 100])),
+            y=alt.Y("overheat_score:Q", title="20日回撤风险分", scale=alt.Scale(domain=[0, 100])),
             size=alt.Size("market_cap_100m:Q", title="总市值（亿元）", scale=alt.Scale(range=[35, 850])),
-            color=alt.Color("group:N", title="标签", scale=alt.Scale(domain=list(GROUP_COLORS), range=list(GROUP_COLORS.values()))),
-            tooltip=[alt.Tooltip("name:N", title="股票"), alt.Tooltip("ts_code:N", title="代码"), alt.Tooltip("healthcare_subindustry:N", title="子行业"), alt.Tooltip("signal_label:N", title="研究信号"), alt.Tooltip("momentum_score:Q", title="趋势强度", format=".1f"), alt.Tooltip("valuation_score:Q", title="估值分", format=".1f"), alt.Tooltip("overheat_score:Q", title="追高风险", format=".1f")],
+            color=alt.Color(
+                "risk_bucket:N",
+                title="风险档",
+                scale=alt.Scale(domain=["低风险", "中风险", "高风险"], range=["#2E7D5B", "#D89B2B", "#C8423B"]),
+            ),
+            tooltip=[
+                alt.Tooltip("name:N", title="股票"),
+                alt.Tooltip("ts_code:N", title="代码"),
+                alt.Tooltip("healthcare_subindustry:N", title="子行业"),
+                alt.Tooltip("two_dimension_label:N", title="二维标签"),
+                alt.Tooltip("momentum_score:Q", title="趋势分", format=".1f"),
+                alt.Tooltip("overheat_score:Q", title="风险分", format=".1f"),
+            ],
         )
         rules = alt.layer(
-            alt.Chart(pd.DataFrame({"x": [70]})).mark_rule(color="#C8423B", strokeDash=[4, 4]).encode(x="x:Q"),
-            alt.Chart(pd.DataFrame({"y": [90]})).mark_rule(color="#C8423B", strokeDash=[4, 4]).encode(y="y:Q"),
+            alt.Chart(pd.DataFrame({"x": [40]})).mark_rule(color="#AAB2B9", strokeDash=[3, 3]).encode(x="x:Q"),
+            alt.Chart(pd.DataFrame({"x": [70]})).mark_rule(color="#4F6D7A", strokeDash=[4, 4]).encode(x="x:Q"),
+            alt.Chart(pd.DataFrame({"y": [30]})).mark_rule(color="#2E7D5B", strokeDash=[3, 3]).encode(y="y:Q"),
+            alt.Chart(pd.DataFrame({"y": [70]})).mark_rule(color="#C8423B", strokeDash=[4, 4]).encode(y="y:Q"),
         )
-        st.altair_chart((scatter_base + rules).properties(height=430).interactive())
-        st.caption("右下区域通常代表‘趋势强、尚未极端过热’；右上代表‘趋势强但追高风险高’。虚线分别为趋势70、风险90。")
+        st.altair_chart((scatter + rules).properties(height=410).interactive())
+        st.caption("二维分档：趋势40/70为分界，风险30/70为分界；分数越高表示预测回撤风险越高。")
 
     with st.container(border=True):
-        st.subheader("子行业状态", anchor=False)
-        industry_view = industries[industries["healthcare_subindustry"].isin(st.session_state.get("selected_industries", []))].copy()
-        industry_view["state"] = np.select([industry_view["median_momentum"] >= 60, industry_view["median_momentum"] >= 40], ["强", "中性"], default="弱")
-        bars = alt.Chart(industry_view).mark_bar(cornerRadiusEnd=3).encode(
-            x=alt.X("median_momentum:Q", title="趋势强度中位数", scale=alt.Scale(domain=[0, 100])),
+        st.markdown("**当前二维分布**")
+        current_matrix = (
+            filtered.groupby(["trend_bucket", "risk_bucket"], observed=True)
+            .size()
+            .unstack(fill_value=0)
+            .reindex(index=["强趋势", "中趋势", "弱趋势"], columns=["低风险", "中风险", "高风险"], fill_value=0)
+        )
+        current_matrix.index.name = "趋势档"
+        current_matrix.columns.name = "风险档"
+        st.dataframe(current_matrix)
+
+    with st.container(border=True):
+        st.markdown("**子行业趋势**")
+        industry_view = industry_summary[
+            industry_summary["healthcare_subindustry"].isin(
+                st.session_state.get("selected_industries", [])
+            )
+        ].copy()
+        bars = alt.Chart(industry_view).mark_bar(cornerRadiusEnd=3, color="#587A95").encode(
+            x=alt.X("median_momentum:Q", title="趋势分中位数", scale=alt.Scale(domain=[0, 100])),
             y=alt.Y("healthcare_subindustry:N", title=None, sort="-x"),
-            color=alt.Color("state:N", title="状态", scale=alt.Scale(domain=["强", "中性", "弱"], range=["#C8423B", "#D69B35", "#7A8793"])),
-            tooltip=[alt.Tooltip("healthcare_subindustry:N", title="子行业"), alt.Tooltip("stock_count:Q", title="股票数"), alt.Tooltip("median_momentum:Q", title="趋势中位数", format=".1f"), alt.Tooltip("median_ret_20d:Q", title="20日收益", format=".1%"), alt.Tooltip("group_a_count:Q", title="A组数量")],
+            tooltip=[
+                alt.Tooltip("healthcare_subindustry:N", title="子行业"),
+                alt.Tooltip("stock_count:Q", title="股票数"),
+                alt.Tooltip("median_momentum:Q", title="趋势分中位数", format=".1f"),
+                alt.Tooltip("median_overheat:Q", title="风险分中位数", format=".1f"),
+                alt.Tooltip("strong_trend_count:Q", title="强趋势数量"),
+                alt.Tooltip("high_risk_count:Q", title="高风险数量"),
+            ],
         ).properties(height=max(300, 22 * len(industry_view)))
         st.altair_chart(bars)
 
+    with st.container(border=True):
+        st.markdown("**股票清单**")
+        market_table = filtered[
+            [
+                "market_rank", "name", "ts_code", "healthcare_subindustry",
+                "trend_bucket", "risk_bucket", "momentum_score", "overheat_score",
+                "ret_5d", "ret_20d", "ret_60d", "ret_120d", "market_cap_100m",
+            ]
+        ].copy()
+        st.dataframe(
+            market_table,
+            hide_index=True,
+            height=560,
+            column_config={
+                "market_rank": st.column_config.NumberColumn("趋势排名", pinned=True, format="%d"),
+                "name": st.column_config.TextColumn("股票", pinned=True),
+                "ts_code": "代码",
+                "healthcare_subindustry": "子行业",
+                "trend_bucket": "趋势档",
+                "risk_bucket": "风险档",
+                "momentum_score": st.column_config.ProgressColumn("趋势分", min_value=0, max_value=100, format="%.1f"),
+                "overheat_score": st.column_config.ProgressColumn("风险分", min_value=0, max_value=100, format="%.1f"),
+                "ret_5d": st.column_config.NumberColumn("5日", format="percent"),
+                "ret_20d": st.column_config.NumberColumn("20日", format="percent"),
+                "ret_60d": st.column_config.NumberColumn("60日", format="percent"),
+                "ret_120d": st.column_config.NumberColumn("120日", format="percent"),
+                "market_cap_100m": st.column_config.NumberColumn("总市值(亿)", format="%.0f"),
+            },
+        )
+        st.download_button(
+            "下载当前筛选结果",
+            market_table.to_csv(index=False, encoding="utf-8-sig"),
+            file_name=f"a_share_healthcare_trend_risk_{meta['as_of_date']}.csv",
+            mime="text/csv",
+            icon=":material/download:",
+        )
+
 with backtest_tab:
-    st.subheader("过去三年A/B/C分组回测", anchor=False)
-    selected_horizon = st.segmented_control(
-        "未来收益周期",
-        ["5日", "20日", "120日"],
-        default="20日",
+    st.subheader("趋势 × 风险二维回测", anchor=False)
+    matrix_horizon_label = st.segmented_control(
+        "二维矩阵周期",
+        ["5日", "20日"],
+        default="5日",
         required=True,
-        key="backtest_horizon",
+        key="two_dimension_horizon",
     )
-    horizon_sessions = int(selected_horizon.removesuffix("日"))
-    horizon_meta = group_backtest_meta["horizons"][str(horizon_sessions)]
-    horizon_summary = group_backtest[group_backtest["horizon_sessions"] == horizon_sessions].copy()
-    horizon_yearly = group_backtest_yearly[
-        group_backtest_yearly["horizon_sessions"] == horizon_sessions
+    matrix_horizon = int(matrix_horizon_label.removesuffix("日"))
+    matrix_data = two_dimension_backtest[
+        two_dimension_backtest["horizon_sessions"] == matrix_horizon
     ].copy()
+    trend_order = ["强趋势", "中趋势", "弱趋势"]
+    risk_order = ["低风险", "中风险", "高风险"]
+
+    return_matrix = matrix_data.pivot(
+        index="trend_bucket", columns="risk_bucket", values="average_forward_return"
+    ).reindex(index=trend_order, columns=risk_order)
+    drawdown_matrix = matrix_data.pivot(
+        index="trend_bucket", columns="risk_bucket", values="average_forward_drawdown"
+    ).reindex(index=trend_order, columns=risk_order)
+    count_matrix = matrix_data.pivot(
+        index="trend_bucket", columns="risk_bucket", values="average_stock_count"
+    ).reindex(index=trend_order, columns=risk_order)
+    period_matrix = matrix_data.pivot(
+        index="trend_bucket", columns="risk_bucket", values="period_count"
+    ).reindex(index=trend_order, columns=risk_order)
+    for matrix in [return_matrix, drawdown_matrix, count_matrix, period_matrix]:
+        matrix.index.name = "趋势档"
+        matrix.columns.name = "风险档"
+
     st.caption(
-        f"{horizon_meta['start_entry_date']}至{horizon_meta['end_entry_date']}，"
-        f"每{horizon_sessions}个交易日形成一次非重叠组合并持有{horizon_sessions}个交易日；"
-        "每期先对组内股票等权，再跨期平均。"
+        "趋势档：强≥70、中40–70、弱<40；风险档：低<30、中30–70、高≥70。"
+        "每格先在每个调仓日对股票等权，再对调仓期等权平均。"
     )
-    metrics_by_group = horizon_summary.set_index("group")
-    with st.container(horizontal=True):
-        for group in ["A", "B", "C"]:
-            result = metrics_by_group.loc[group]
-            st.metric(
-                f"{group}组平均未来{horizon_sessions}日收益",
-                pct(result["average_forward_return"]),
-                f"胜率 {result['win_rate']:.1%}",
-                border=True,
-            )
-
-    if horizon_sessions == 120:
-        st.warning(
-            "120日周期只有6–7个独立调仓期，均值容易受少数时期影响；A组仍未领先B/C组，"
-            "但这一周期更适合视为方向性证据。",
-            icon=":material/warning:",
-        )
-    else:
-        st.warning(
-            f"过去三年样本中，A组的未来{horizon_sessions}日平均收益没有领先B/C组。"
-            "因此A/B/C应理解为当前趋势状态标签，不应直接解释为未来收益评级。",
-            icon=":material/warning:",
-        )
-
-    chart_left, chart_right = st.columns(2, gap="medium")
-    with chart_left.container(border=True):
-        st.markdown("**全样本平均收益与回撤**")
-        backtest_long = horizon_summary.melt(
-            id_vars=["group"],
-            value_vars=["average_forward_return", "average_forward_drawdown"],
-            var_name="metric",
-            value_name="value",
-        )
-        backtest_long["metric"] = backtest_long["metric"].map(
-            {"average_forward_return": "平均收益", "average_forward_drawdown": "平均最大回撤"}
-        )
-        result_bars = alt.Chart(backtest_long).mark_bar().encode(
-            x=alt.X("group:N", title="分组", sort=["A", "B", "C"]),
-            y=alt.Y("value:Q", title=None, axis=alt.Axis(format="%")),
-            xOffset="metric:N",
-            color=alt.Color("metric:N", title="指标", scale=alt.Scale(range=["#587A95", "#C8423B"])),
-            tooltip=[
-                alt.Tooltip("group:N", title="分组"),
-                alt.Tooltip("metric:N", title="指标"),
-                alt.Tooltip("value:Q", title="数值", format=".2%"),
-            ],
-        ).properties(height=360)
-        st.altair_chart(result_bars)
-
-    with chart_right.container(border=True):
-        st.markdown(f"**按进入年份拆分的平均未来{horizon_sessions}日收益**")
-        yearly_bars = alt.Chart(horizon_yearly).mark_bar().encode(
-            x=alt.X("year:O", title="进入年份"),
-            y=alt.Y("average_forward_return:Q", title=f"平均未来{horizon_sessions}日收益", axis=alt.Axis(format="%")),
-            xOffset="group:N",
-            color=alt.Color("group:N", title="分组", scale=alt.Scale(domain=list(GROUP_COLORS), range=list(GROUP_COLORS.values()))),
-            tooltip=[
-                alt.Tooltip("year:O", title="年份"),
-                alt.Tooltip("group:N", title="分组"),
-                alt.Tooltip("average_forward_return:Q", title="平均收益", format=".2%"),
-                alt.Tooltip("win_rate:Q", title="组合胜率", format=".1%"),
-                alt.Tooltip("rebalance_count:Q", title="调仓期数"),
-            ],
-        ).properties(height=360)
-        st.altair_chart(yearly_bars)
-
-    with st.container(border=True):
-        st.markdown("**回测明细摘要**")
+    matrix_left, matrix_right = st.columns(2, gap="medium")
+    with matrix_left.container(border=True):
+        st.markdown(f"**未来{matrix_horizon}日平均收益**")
         st.dataframe(
-            horizon_summary,
-            hide_index=True,
+            return_matrix,
             column_config={
-                "horizon_sessions": None,
-                "group": "分组",
-                "average_forward_return": st.column_config.NumberColumn(f"平均未来{horizon_sessions}日收益", format="percent"),
-                "median_period_return": st.column_config.NumberColumn("期度收益中位数", format="percent"),
-                "win_rate": st.column_config.NumberColumn("组合胜率", format="percent"),
-                "average_forward_drawdown": st.column_config.NumberColumn("平均最大回撤", format="percent"),
-                "rebalance_count": "有效调仓期数",
-                "observation_count": "股票观测数",
-                "annual_average_dispersion": st.column_config.NumberColumn("年度均值离散度", format="percent"),
+                bucket: st.column_config.NumberColumn(bucket, format="percent")
+                for bucket in risk_order
             },
         )
-        st.caption(
-            f"最后一个组合于{horizon_meta['last_exit_date']}退出，共"
-            f"{horizon_meta['rebalance_count']}个调仓日期、{horizon_meta['observation_count']:,}个股票观测。"
+    with matrix_right.container(border=True):
+        st.markdown(f"**未来{matrix_horizon}日平均建仓后回撤**")
+        st.dataframe(
+            drawdown_matrix,
+            column_config={
+                bucket: st.column_config.NumberColumn(bucket, format="percent")
+                for bucket in risk_order
+            },
         )
 
-    with st.expander("回测规则与局限"):
-        st.markdown(
-            """
-            - 每个历史时点只使用当时及此前价格，按当前完全相同的趋势分、过热分和A/B/C阈值重新分类。
-            - 5/20/120日都使用与持有期相同的调仓间隔，形成非重叠组合；每个调仓日组内股票等权。
-            - 未计交易成本、停牌成交限制、涨跌停和冲击成本；当前310只股票池用于全部历史时期，存在幸存者偏差。
-            - A组在部分历史调仓日为空，因此有效期数少于B/C组；120日周期独立样本尤其有限。结果是历史描述，不构成未来收益承诺。
-            """
+    support_left, support_right = st.columns(2, gap="medium")
+    with support_left.container(border=True):
+        st.markdown("**每格平均股票数**")
+        st.dataframe(
+            count_matrix,
+            column_config={
+                bucket: st.column_config.NumberColumn(bucket, format="%.1f")
+                for bucket in risk_order
+            },
+        )
+    with support_right.container(border=True):
+        st.markdown("**有效调仓期数**")
+        st.dataframe(
+            period_matrix,
+            column_config={
+                bucket: st.column_config.NumberColumn(bucket, format="%d")
+                for bucket in risk_order
+            },
         )
 
-with factor_tab:
-    st.subheader("单因子有效性与十分位收益", anchor=False)
-    factor_horizon_label = st.segmented_control(
-        "检验周期", ["5日", "20日", "60日", "120日"], default="20日", required=True, key="factor_horizon"
-    )
-    factor_horizon = int(factor_horizon_label.removesuffix("日"))
-    factor_view = factor_research[
-        (factor_research["horizon_sessions"] == factor_horizon)
-        & (factor_research["version"] == "中性化")
-    ].copy()
-    st.caption(
-        "收益因子已剔除子行业、对数总市值和20日波动率影响；风险因子剔除子行业与市值，"
-        "保留个股波动性。Rank IC越高，截面排序越有效。"
-    )
-    alpha_view = factor_view[factor_view["factor_type"] == "收益因子"].sort_values("mean_rank_ic", ascending=False)
-    risk_view = factor_view[factor_view["factor_type"] == "风险因子"].sort_values("mean_rank_ic", ascending=False)
-    best_alpha = alpha_view.iloc[0]
-    best_risk = risk_view.iloc[0]
-    with st.container(horizontal=True):
-        st.metric("最佳收益因子", best_alpha["factor_label"], f"IC {best_alpha['mean_rank_ic']:.3f}", border=True)
-        st.metric("收益因子IC中位数", f"{alpha_view['mean_rank_ic'].median():.3f}", border=True)
-        st.metric("最佳风险因子", best_risk["factor_label"], f"IC {best_risk['mean_rank_ic']:.3f}", border=True)
-        st.metric("风险因子IC中位数", f"{risk_view['mean_rank_ic'].median():.3f}", border=True)
-
-    chart_left, chart_right = st.columns(2, gap="medium")
-    with chart_left.container(border=True):
-        st.markdown("**收益因子Rank IC**")
-        alpha_chart = alt.Chart(alpha_view).mark_bar(cornerRadiusEnd=3).encode(
-            x=alt.X("mean_rank_ic:Q", title="平均Rank IC"),
-            y=alt.Y("factor_label:N", title=None, sort="-x"),
-            color=alt.condition("datum.mean_rank_ic > 0", alt.value("#587A95"), alt.value("#C8423B")),
-            tooltip=["factor_label:N", alt.Tooltip("mean_rank_ic:Q", format=".3f"), alt.Tooltip("top_bottom_spread:Q", format=".2%")],
-        ).properties(height=330)
-        st.altair_chart(alpha_chart)
-    with chart_right.container(border=True):
-        st.markdown("**风险因子Rank IC**")
-        risk_chart = alt.Chart(risk_view).mark_bar(cornerRadiusEnd=3, color="#C8423B").encode(
-            x=alt.X("mean_rank_ic:Q", title="平均Rank IC"),
-            y=alt.Y("factor_label:N", title=None, sort="-x"),
-            tooltip=["factor_label:N", alt.Tooltip("mean_rank_ic:Q", format=".3f"), alt.Tooltip("top_bottom_spread:Q", format=".2%")],
-        ).properties(height=330)
-        st.altair_chart(risk_chart)
-
-    available_factor_labels = factor_view.sort_values("factor_label")["factor_label"].tolist()
-    selected_factor_label = st.selectbox("查看十分位结果", available_factor_labels, key="factor_decile_selection")
-    selected_factor = factor_view.loc[factor_view["factor_label"] == selected_factor_label, "factor"].iloc[0]
-    decile_view = factor_deciles[
-        (factor_deciles["horizon_sessions"] == factor_horizon)
-        & (factor_deciles["version"] == "中性化")
-        & (factor_deciles["factor"] == selected_factor)
-    ]
-    with st.container(border=True):
-        target_label = decile_view["target"].iloc[0]
-        st.markdown(f"**{selected_factor_label}：十分位{target_label}**")
-        decile_chart = alt.Chart(decile_view).mark_bar(cornerRadiusEnd=3, color="#587A95").encode(
-            x=alt.X("decile:O", title="因子十分位（1低，10高）"),
-            y=alt.Y("average_target:Q", title=f"平均未来{factor_horizon}日{target_label}", axis=alt.Axis(format="%")),
-            tooltip=[alt.Tooltip("decile:O", title="十分位"), alt.Tooltip("average_target:Q", title=target_label, format=".2%")],
-        ).properties(height=330)
-        st.altair_chart(decile_chart)
-
-with model_tab:
-    st.subheader("滚动训练与真正样本外验证", anchor=False)
-    model_horizon_label = st.segmented_control(
-        "模型周期", ["5日", "20日", "60日", "120日"], default="20日", required=True, key="model_horizon"
-    )
-    model_horizon = int(model_horizon_label.removesuffix("日"))
-    model_summary = model_oos[model_oos["horizon_sessions"] == model_horizon].set_index("model")
-    selection_result = risk_model_selection[
-        risk_model_selection["horizon_sessions"] == model_horizon
+    strong_low = matrix_data[
+        (matrix_data["trend_bucket"] == "强趋势")
+        & (matrix_data["risk_bucket"] == "低风险")
     ].iloc[0]
-    return_result = model_summary.loc["收益模型"]
-    risk_result = model_summary.loc[selection_result["selected_model"]]
-    with st.container(horizontal=True):
-        st.metric("收益模型样本外IC", f"{return_result['mean_rank_ic']:.3f}", border=True)
-        st.metric("收益最高-最低十分位", pct(return_result["top_bottom_spread"]), border=True)
-        st.metric("回撤模型样本外IC", f"{risk_result['mean_rank_ic']:.3f}", border=True)
-        st.metric("高-低风险回撤差", pct(risk_result["top_bottom_spread"]), border=True)
-    if return_result["mean_rank_ic"] < 0.03:
-        st.warning(
-            "收益模型的样本外排序能力很弱，不应作为单独买入依据；回撤模型明显更稳定，"
-            "更适合用于排除高风险股票。",
-            icon=":material/warning:",
-        )
-
-    comparison_view = model_summary.loc[["基础回撤模型", "增强回撤模型"]].reset_index()
-    with st.container(border=True):
-        st.markdown("**基础与增强回撤模型比较**")
-        st.dataframe(
-            comparison_view[["model", "mean_rank_ic", "top_bottom_spread", "positive_year_rate", "rebalance_count"]],
-            hide_index=True,
-            column_config={
-                "model": "模型", "mean_rank_ic": st.column_config.NumberColumn("样本外Rank IC", format="%.3f"),
-                "top_bottom_spread": st.column_config.NumberColumn("高低风险回撤差", format="percent"),
-                "positive_year_rate": st.column_config.NumberColumn("年度IC为正比例", format="percent"),
-                "rebalance_count": "独立调仓期",
-            },
-        )
-        if selection_result["promotion_passed"]:
-            st.success(
-                f"增强模型通过升级标准，当前正式风险分使用{selection_result['selected_model']}；"
-                f"Rank IC提升 {selection_result['rank_ic_change']:.3f}，"
-                f"高低风险回撤差扩大 {selection_result['spread_change']:.2%}。"
-            )
-        else:
-            st.info(
-                "新增风险因子已保留在研究层，但增强模型未同时满足IC、十分位差、跨年稳定性和样本门槛，"
-                "当前正式风险分继续使用基础模型。"
-            )
-
-    yearly_view = model_oos_yearly[model_oos_yearly["horizon_sessions"] == model_horizon].copy()
-    with st.container(border=True):
-        st.markdown("**逐年样本外Rank IC**")
-        yearly_chart = alt.Chart(yearly_view).mark_bar().encode(
-            x=alt.X("test_year:O", title="测试年份"),
-            y=alt.Y("mean_rank_ic:Q", title="样本外平均Rank IC"),
-            xOffset="model:N",
-            color=alt.Color("model:N", title="模型", scale=alt.Scale(range=["#587A95", "#C8423B"])),
-            tooltip=["test_year:O", "model:N", alt.Tooltip("mean_rank_ic:Q", format=".3f"), alt.Tooltip("top_bottom_spread:Q", format=".2%")],
-        ).properties(height=350)
-        st.altair_chart(yearly_chart)
-
-    current_model = model_scores[model_scores["horizon_sessions"] == model_horizon].copy()
-    current_model = current_model.merge(
-        rankings[["ts_code", "group", "signal_label", "market_rank"]], on="ts_code", how="left"
+    st.info(
+        f"强趋势+低风险的未来{matrix_horizon}日平均收益为"
+        f"{strong_low['average_forward_return']:.2%}，平均建仓后回撤为"
+        f"{strong_low['average_forward_drawdown']:.2%}。但该格平均只有"
+        f"{strong_low['average_stock_count']:.1f}只股票，且只在"
+        f"{int(strong_low['period_count'])}个调仓期出现，收益均值容易受少数股票影响。"
     )
-    model_candidates = current_model[
-        (current_model["expected_return_score"] >= 70) & (current_model["drawdown_risk_score"] <= 30)
-    ].sort_values(["expected_return_score", "drawdown_risk_score"], ascending=[False, True])
-    with st.container(border=True):
-        st.markdown("**当前高收益分、低回撤风险观察名单**")
-        st.caption("收益分只代表弱预测模型的相对排序；必须与低回撤风险条件联合使用。")
-        st.dataframe(
-            model_candidates[["name", "ts_code", "healthcare_subindustry", "expected_return_score", "drawdown_risk_score", "group", "signal_label"]],
-            hide_index=True,
-            column_config={
-                "name": st.column_config.TextColumn("股票", pinned=True), "ts_code": "代码", "healthcare_subindustry": "子行业",
-                "expected_return_score": st.column_config.ProgressColumn("收益模型分", min_value=0, max_value=100, format="%.1f"),
-                "drawdown_risk_score": st.column_config.ProgressColumn("回撤风险分", min_value=0, max_value=100, format="%.1f"),
-                "group": "旧趋势标签", "signal_label": "旧研究信号",
-            },
-        )
-    with st.expander("训练与中性化口径"):
+    with st.expander("回测口径与局限"):
         st.markdown(
             f"""
-            - 每个测试年度只使用该年度开始前已经结束持有期的样本训练，样本外从{factor_research_meta['oos_start_year']}年开始。
-            - 收益模型和回撤模型分别训练，均使用带L2约束的线性模型；没有把回撤风险硬混入收益预测。
-            - 收益因子中性化：{factor_research_meta['alpha_neutralization']}。
-            - 第一批候选因子：{'、'.join(factor_research_meta['first_wave_risk_factors'])}。
-            - 第二批候选因子：{'、'.join(factor_research_meta['second_wave_risk_factors'])}。
-            - Beta基准：市场使用{factor_research_meta['market_beta_benchmark']}；医疗板块使用{factor_research_meta['healthcare_beta_benchmark']}。
-            - 风险因子中性化：{factor_research_meta['risk_neutralization']}。
-            - 升级标准：{factor_research_meta['risk_model_promotion_rule']}。
-            - 当前股票池回看历史仍有幸存者偏差，未计交易成本、涨跌停、停牌和冲击成本。
+            - 二维规则：趋势强≥70、中40–70、弱<40；风险低<30、中30–70、高≥70。
+            - 风险模型：{group_backtest_meta['risk_training_rule']}，不使用未来数据形成历史分组。
+            - 成交口径：{group_backtest_meta['execution']}；{group_backtest_meta['weighting']}。
+            - 未计交易成本、涨跌停、停牌、冲击成本；{group_backtest_meta['universe_note']}
+            - 5日矩阵有146个非重叠调仓期，20日矩阵有37个非重叠调仓期。某些单元格在部分日期为空，因此同时展示有效期数。
             """
         )
 
-with ranking_tab:
-    st.subheader("股票排名与研究信号", anchor=False)
-    st.caption("默认只显示核心字段；需要更多指标时可下载完整筛选结果。")
-    table = filtered[["market_rank", "name", "ts_code", "healthcare_subindustry", "signal_label", "group", "momentum_score", "valuation_score", "risk_score", "overheat_score", "ret_20d", "ret_60d", "latest_pe_ttm", "latest_pb", "valuation_status", "market_cap_100m"]].copy()
-    st.dataframe(table, hide_index=True, height=650, column_config={
-        "market_rank": st.column_config.NumberColumn("趋势排名", pinned=True, format="%d"),
-        "name": st.column_config.TextColumn("股票", pinned=True), "ts_code": "代码", "healthcare_subindustry": "子行业", "signal_label": "研究信号", "group": "趋势标签",
-        "momentum_score": st.column_config.ProgressColumn("趋势强度", min_value=0, max_value=100, format="%.1f"),
-        "valuation_score": st.column_config.ProgressColumn("估值分", min_value=0, max_value=100, format="%.1f"),
-        "risk_score": st.column_config.ProgressColumn("风险分", min_value=0, max_value=100, format="%.1f"),
-        "overheat_score": st.column_config.NumberColumn("追高风险", format="%.1f"), "ret_20d": st.column_config.NumberColumn("20日", format="percent"), "ret_60d": st.column_config.NumberColumn("60日", format="percent"),
-        "latest_pe_ttm": st.column_config.NumberColumn("PE_TTM", format="%.1f"), "latest_pb": st.column_config.NumberColumn("PB", format="%.2f"), "valuation_status": "估值状态", "market_cap_100m": st.column_config.NumberColumn("总市值(亿)", format="%.0f"),
-    })
-    st.download_button("下载当前筛选结果", filtered.to_csv(index=False, encoding="utf-8-sig"), file_name=f"a_share_healthcare_research_{meta['as_of_date']}.csv", mime="text/csv", icon=":material/download:")
-
 with stock_tab:
-    options = filtered.sort_values("market_rank").apply(lambda r: f"{r['name']} · {r['ts_code']}", axis=1).tolist()
+    st.subheader("个股拆解", anchor=False)
+    options = filtered.sort_values("market_rank").apply(
+        lambda row: f"{row['name']} · {row['ts_code']}", axis=1
+    ).tolist()
     if not options:
         st.info("当前筛选条件下没有股票。")
     else:
@@ -489,36 +473,58 @@ with stock_tab:
         row = rankings.loc[rankings["ts_code"] == selected_code].iloc[0]
         with st.container(horizontal=True):
             st.metric("趋势排名", f"{int(row['market_rank'])} / {len(rankings)}", border=True)
-            st.metric("研究信号", row["signal_label"], border=True)
-            st.metric("趋势强度", f"{row['momentum_score']:.1f}", border=True)
-            st.metric("估值分", "—" if pd.isna(row["valuation_score"]) else f"{row['valuation_score']:.1f}", border=True)
-            st.metric("风险分", f"{row['risk_score']:.1f}", border=True)
+            st.metric("二维标签", row["two_dimension_label"], border=True)
+            st.metric("趋势分", f"{row['momentum_score']:.1f}", border=True)
+            st.metric("风险分", f"{row['overheat_score']:.1f}", border=True)
+
         detail_left, detail_right = st.columns(2, gap="medium")
         with detail_left.container(border=True):
-            st.markdown("**评分拆解**")
-            st.write(f"趋势强度：{row['momentum_score']:.1f} · 20日 {pct(row['ret_20d'])} · 60日 {pct(row['ret_60d'])}")
-            st.write(f"估值：{row['valuation_status']} · PE {row['latest_pe_ttm']:.1f} · PB {row['latest_pb']:.2f}" if row["valuation_status"] != "估值缺失" else "估值：缺失，未用低估值逻辑加分")
-            st.write(f"风险：追高风险 {row['overheat_score']:.1f} · 年化波动率 {pct(row['volatility_20d'])} · 距60日高点 {pct(row['drawdown_60d'])}")
+            st.markdown("**趋势拆解**")
+            st.write(
+                f"5日 {pct(row['ret_5d'])} · 20日 {pct(row['ret_20d'])} · "
+                f"60日 {pct(row['ret_60d'])} · 120日 {pct(row['ret_120d'])}"
+            )
+            st.write(
+                f"距MA20 {pct(row['ma20_gap'])} · 距MA60 {pct(row['ma60_gap'])} · "
+                f"距60日高点 {pct(row['drawdown_60d'])}"
+            )
         with detail_right.container(border=True):
-            st.markdown("**数据与比较口径**")
-            st.write(f"子行业：{row['healthcare_subindustry']} · 行业内趋势排名 {int(row['subindustry_rank'])}/{int(row['subindustry_count'])}")
-            st.write(f"价格日期：{row['price_date'].date()} · 估值日期：{row['valuation_as_of_date'].date() if pd.notna(row['valuation_as_of_date']) else '未知'}")
-            st.write(f"数据完整度：{row['data_completeness_score']:.0f}/100 · {row['classification_confidence']} 分类置信度")
-        horizon = st.segmented_control("走势区间", ["60日", "120日", "250日"], default="120日", required=True)
-        selected_history = normalized_history(history, [selected_code], {"60日": 60, "120日": 120, "250日": 250}[horizon])
-        line = alt.Chart(selected_history).mark_line(color="#D94B4B", strokeWidth=2.5).encode(x=alt.X("trade_date:T", title=None), y=alt.Y("normalized:Q", title="区间起点=100", scale=alt.Scale(zero=False)), tooltip=[alt.Tooltip("trade_date:T", title="日期"), alt.Tooltip("normalized:Q", title="指数", format=".1f")]).properties(height=390).interactive()
+            st.markdown("**回撤风险拆解**")
+            st.write(
+                f"{RISK_HORIZON}日回撤模型分：{row['overheat_score']:.1f} · "
+                f"风险档：{row['risk_bucket']} · 模型：{row['risk_model_version']}"
+            )
+            st.write(
+                f"子行业：{row['healthcare_subindustry']} · "
+                f"价格日期：{row['price_date'].date()} · "
+                f"模型训练截止：{row['model_training_end'].date()}"
+            )
+
+        horizon = st.segmented_control(
+            "走势区间", ["60日", "120日", "250日"], default="120日", required=True
+        )
+        selected_history = normalized_history(
+            history, [selected_code], {"60日": 60, "120日": 120, "250日": 250}[horizon]
+        )
+        line = alt.Chart(selected_history).mark_line(color="#D94B4B", strokeWidth=2.5).encode(
+            x=alt.X("trade_date:T", title=None),
+            y=alt.Y("normalized:Q", title="区间起点=100", scale=alt.Scale(zero=False)),
+            tooltip=[
+                alt.Tooltip("trade_date:T", title="日期"),
+                alt.Tooltip("normalized:Q", title="指数", format=".1f"),
+            ],
+        ).properties(height=390).interactive()
         st.altair_chart(line)
 
 with compare_tab:
     st.subheader("手动选择个股进行比较", anchor=False)
-    st.caption("可从全部310只股票中选择最多8只，不受侧边栏子行业、标签和市值筛选影响。")
+    st.caption("可从全310只股票中选择最多8只，不受侧边栏筛选影响。")
     stock_names = rankings.set_index("ts_code")["name"].to_dict()
     stock_options = rankings.sort_values("market_rank")["ts_code"].tolist()
-    default_comparison = stock_options[:3]
     comparison_codes = st.multiselect(
         "比较股票",
         stock_options,
-        default=default_comparison,
+        default=stock_options[:3],
         format_func=lambda code: f"{stock_names[code]} · {code}",
         max_selections=8,
         placeholder="输入名称或代码搜索，最多选择8只",
@@ -531,10 +537,9 @@ with compare_tab:
         comparison = rankings[rankings["ts_code"].isin(comparison_codes)].sort_values("market_rank").copy()
         comparison_table = comparison[
             [
-                "market_rank", "name", "ts_code", "healthcare_subindustry", "group", "signal_label",
-                "momentum_score", "overheat_score", "valuation_score", "risk_score",
-                "ret_5d", "ret_20d", "ret_60d", "ret_120d", "drawdown_60d",
-                "latest_pe_ttm", "latest_pb", "market_cap_100m",
+                "market_rank", "name", "ts_code", "healthcare_subindustry", "trend_bucket", "risk_bucket",
+                "momentum_score", "overheat_score", "ret_5d", "ret_20d", "ret_60d",
+                "ret_120d", "market_cap_100m",
             ]
         ]
         with st.container(border=True):
@@ -547,31 +552,26 @@ with compare_tab:
                     "name": st.column_config.TextColumn("股票", pinned=True),
                     "ts_code": "代码",
                     "healthcare_subindustry": "子行业",
-                    "group": "趋势标签",
-                    "signal_label": "研究信号",
+                    "trend_bucket": "趋势档",
+                    "risk_bucket": "风险档",
                     "momentum_score": st.column_config.ProgressColumn("趋势分", min_value=0, max_value=100, format="%.1f"),
-                    "overheat_score": st.column_config.ProgressColumn("过热分", min_value=0, max_value=100, format="%.1f"),
-                    "valuation_score": st.column_config.ProgressColumn("估值分", min_value=0, max_value=100, format="%.1f"),
-                    "risk_score": st.column_config.ProgressColumn("风险分", min_value=0, max_value=100, format="%.1f"),
+                    "overheat_score": st.column_config.ProgressColumn("风险分", min_value=0, max_value=100, format="%.1f"),
                     "ret_5d": st.column_config.NumberColumn("5日", format="percent"),
                     "ret_20d": st.column_config.NumberColumn("20日", format="percent"),
                     "ret_60d": st.column_config.NumberColumn("60日", format="percent"),
                     "ret_120d": st.column_config.NumberColumn("120日", format="percent"),
-                    "drawdown_60d": st.column_config.NumberColumn("距60日高点", format="percent"),
-                    "latest_pe_ttm": st.column_config.NumberColumn("PE_TTM", format="%.1f"),
-                    "latest_pb": st.column_config.NumberColumn("PB", format="%.2f"),
                     "market_cap_100m": st.column_config.NumberColumn("总市值(亿)", format="%.0f"),
                 },
             )
 
         chart_left, chart_right = st.columns(2, gap="medium")
         with chart_left.container(border=True):
-            st.markdown("**趋势与过热位置**")
-            market_background = alt.Chart(rankings).mark_circle(size=35, color="#C8CDD2", opacity=0.35).encode(
+            st.markdown("**趋势与风险位置**")
+            background = alt.Chart(rankings).mark_circle(size=35, color="#C8CDD2", opacity=0.35).encode(
                 x=alt.X("momentum_score:Q", title="趋势分", scale=alt.Scale(domain=[0, 100])),
-                y=alt.Y("overheat_score:Q", title="过热分", scale=alt.Scale(domain=[0, 100])),
+                y=alt.Y("overheat_score:Q", title="回撤风险分", scale=alt.Scale(domain=[0, 100])),
             )
-            selected_points = alt.Chart(comparison).mark_circle(size=180, stroke="white", strokeWidth=1.5).encode(
+            points = alt.Chart(comparison).mark_circle(size=180, stroke="white", strokeWidth=1.5).encode(
                 x="momentum_score:Q",
                 y="overheat_score:Q",
                 color=alt.Color("name:N", title="股票"),
@@ -579,35 +579,34 @@ with compare_tab:
                     alt.Tooltip("name:N", title="股票"),
                     alt.Tooltip("market_rank:Q", title="趋势排名"),
                     alt.Tooltip("momentum_score:Q", title="趋势分", format=".1f"),
-                    alt.Tooltip("overheat_score:Q", title="过热分", format=".1f"),
-                    alt.Tooltip("signal_label:N", title="研究信号"),
+                    alt.Tooltip("overheat_score:Q", title="风险分", format=".1f"),
+                    alt.Tooltip("two_dimension_label:N", title="二维标签"),
                 ],
             )
-            selected_labels = alt.Chart(comparison).mark_text(dx=9, dy=-9, fontSize=11).encode(
-                x="momentum_score:Q", y="overheat_score:Q", text="name:N", color=alt.Color("name:N", legend=None)
+            labels = alt.Chart(comparison).mark_text(dx=9, dy=-9, fontSize=11).encode(
+                x="momentum_score:Q", y="overheat_score:Q", text="name:N",
+                color=alt.Color("name:N", legend=None),
             )
-            comparison_rules = alt.layer(
-                alt.Chart(pd.DataFrame({"x": [70]})).mark_rule(color="#C8423B", strokeDash=[4, 4]).encode(x="x:Q"),
-                alt.Chart(pd.DataFrame({"y": [90]})).mark_rule(color="#C8423B", strokeDash=[4, 4]).encode(y="y:Q"),
+            rules = alt.layer(
+                alt.Chart(pd.DataFrame({"x": [40]})).mark_rule(color="#AAB2B9", strokeDash=[3, 3]).encode(x="x:Q"),
+                alt.Chart(pd.DataFrame({"x": [70]})).mark_rule(color="#4F6D7A", strokeDash=[4, 4]).encode(x="x:Q"),
+                alt.Chart(pd.DataFrame({"y": [30]})).mark_rule(color="#2E7D5B", strokeDash=[3, 3]).encode(y="y:Q"),
+                alt.Chart(pd.DataFrame({"y": [70]})).mark_rule(color="#C8423B", strokeDash=[4, 4]).encode(y="y:Q"),
             )
-            st.altair_chart(
-                (market_background + selected_points + selected_labels + comparison_rules)
-                .properties(height=390)
-                .interactive()
-            )
+            st.altair_chart((background + points + labels + rules).properties(height=390).interactive())
 
         with chart_right.container(border=True):
             st.markdown("**多周期收益对照**")
-            return_comparison = comparison.melt(
+            returns = comparison.melt(
                 id_vars=["name"],
                 value_vars=["ret_5d", "ret_20d", "ret_60d", "ret_120d"],
                 var_name="period",
                 value_name="return_value",
             )
-            return_comparison["period"] = return_comparison["period"].map(
+            returns["period"] = returns["period"].map(
                 {"ret_5d": "5日", "ret_20d": "20日", "ret_60d": "60日", "ret_120d": "120日"}
             )
-            return_bars = alt.Chart(return_comparison).mark_bar().encode(
+            return_bars = alt.Chart(returns).mark_bar().encode(
                 x=alt.X("period:N", title=None, sort=["5日", "20日", "60日", "120日"]),
                 y=alt.Y("return_value:Q", title="收益率", axis=alt.Axis(format="%")),
                 xOffset="name:N",
@@ -622,10 +621,13 @@ with compare_tab:
 
         with st.container(border=True):
             comparison_horizon = st.segmented_control(
-                "比较区间", ["60日", "120日", "250日"], default="120日", required=True, key="comparison_horizon"
+                "比较区间", ["60日", "120日", "250日"], default="120日", required=True,
+                key="comparison_horizon",
             )
             comparison_history = normalized_history(
-                history, comparison_codes, {"60日": 60, "120日": 120, "250日": 250}[comparison_horizon]
+                history,
+                comparison_codes,
+                {"60日": 60, "120日": 120, "250日": 250}[comparison_horizon],
             )
             comparison_history["name"] = comparison_history["ts_code"].map(stock_names)
             comparison_line = alt.Chart(comparison_history).mark_line(strokeWidth=2.2).encode(
@@ -639,19 +641,108 @@ with compare_tab:
                 ],
             ).properties(height=430).interactive()
             st.altair_chart(comparison_line)
-            st.caption("所有股票按各自区间首个有效收盘价归一化为100，用于比较相对走势，不代表实际价格。")
+            st.caption("所有股票按各自区间首个有效收盘价归一化为100。")
 
 with method_tab:
-    st.subheader("评分方法与数据边界", anchor=False)
-    st.markdown(
-        """
-        - **趋势强度**：5/20/60/120日收益的全市场与子行业内排名，叠加均线和距高点确认；20日、60日窗口权重最高。
-        - **估值分**：PE_TTM和PB只在所属子行业内比较；正PE权重60%，正PB权重40%；负PE或缺失PE不被当作便宜，估值分会因有效字段不足而降权。
-        - **研究信号**：强趋势低过热、强趋势高过热、估值便宜待确认、弱趋势/数据不足。它们是研究优先级，不是买卖评级。
-        - **风险分**：追高风险、20日年化波动率和价格数据滞后度的组合；分数越高，风险越高。
-        - **A/B/C历史表现**：过去三年非重叠5/20/120日回测中，A组均未表现出更高的平均未来收益，因此分组只描述当前趋势确认程度，不构成收益评级。
-        - **新收益/回撤模型**：收益预测与最大回撤风险分别训练；按年度滚动做样本外验证，并对因子实施子行业、市值和波动率中性化。当前证据支持回撤筛查，但不支持把收益分当作强买入信号。
-        - **质量分暂未启用**：当前快照没有ROE、营收增速、扣非利润增速和结构化新闻字段，因此看板不会假装拥有这些信息。
-        """
+    st.subheader("评分方法", anchor=False)
+    trend_col, risk_col = st.columns(2, gap="medium")
+    with trend_col.container(border=True):
+        st.markdown("**趋势分：描述过去价格强弱**")
+        st.markdown(
+            """
+            趋势分是0–100的相对排名分，不是未来收益概率。收益率先分别计算全310只股票和所属子行业内的百分位，然后合成：
+
+            | 因子 | 权重 |
+            |---|---:|
+            | 5日收益率 | 10% |
+            | 20日收益率 | 30% |
+            | 60日收益率 | 35% |
+            | 120日收益率 | 15% |
+            | 相对MA20位置 | 5% |
+            | 距60日高点位置 | 5% |
+
+            四个收益窗口中，全股票池排名贡献65%，子行业内排名贡献25%；均线与高点确认合计10%。
+            """
+        )
+        st.write("趋势分档：强趋势 ≥70 · 中趋势 40–70 · 弱趋势 <40")
+
+    with risk_col.container(border=True):
+        st.markdown("**风险分：预测未来20日最大回撤**")
+        st.markdown(
+            "风险分是增强回撤模型预测值在310只股票中的横截面百分位；"
+            "分数越高，未来20日建仓后回撤风险相对越高。"
+        )
+        risk_factor_table = pd.DataFrame(
+            {
+                "因子组": ["基础"] * len(factor_research_meta["base_risk_factors"])
+                + ["增强"] * len(factor_research_meta["new_risk_factors"]),
+                "具体因子": factor_research_meta["base_risk_factors"]
+                + factor_research_meta["new_risk_factors"],
+            }
+        )
+        st.dataframe(risk_factor_table, hide_index=True, height=430)
+        st.write("风险分档：低风险 <30 · 中风险 30–70 · 高风险 ≥70 · 极端过热 ≥90")
+
+    st.markdown("### 回撤模型验证")
+    selection = risk_model_selection[
+        risk_model_selection["horizon_sessions"] == RISK_HORIZON
+    ].iloc[0]
+    summary = model_oos[model_oos["horizon_sessions"] == RISK_HORIZON].set_index("model")
+    selected_result = summary.loc[selection["selected_model"]]
+    with st.container(horizontal=True):
+        st.metric("当前模型", selection["selected_model"], border=True)
+        st.metric("样本外Rank IC", f"{selected_result['mean_rank_ic']:.3f}", border=True)
+        st.metric("高-低风险回撤差", pct(selected_result["top_bottom_spread"]), border=True)
+        st.metric("年度IC为正比例", pct(selected_result["positive_year_rate"]), border=True)
+
+    comparison = summary.loc[["基础回撤模型", "增强回撤模型"]].reset_index()
+    validation_left, validation_right = st.columns(2, gap="medium")
+    with validation_left.container(border=True):
+        st.markdown("**基础与增强模型**")
+        st.dataframe(
+            comparison[["model", "mean_rank_ic", "top_bottom_spread", "positive_year_rate", "rebalance_count"]],
+            hide_index=True,
+            column_config={
+                "model": "模型",
+                "mean_rank_ic": st.column_config.NumberColumn("样本外Rank IC", format="%.3f"),
+                "top_bottom_spread": st.column_config.NumberColumn("高-低风险回撤差", format="percent"),
+                "positive_year_rate": st.column_config.NumberColumn("年度IC为正比例", format="percent"),
+                "rebalance_count": "独立调仓期",
+            },
+        )
+    yearly = model_oos_yearly[
+        (model_oos_yearly["horizon_sessions"] == RISK_HORIZON)
+        & (model_oos_yearly["model"].isin(["基础回撤模型", "增强回撤模型"]))
+    ].copy()
+    with validation_right.container(border=True):
+        st.markdown("**逐年样本外Rank IC**")
+        yearly_chart = alt.Chart(yearly).mark_bar().encode(
+            x=alt.X("test_year:O", title="测试年份"),
+            y=alt.Y("mean_rank_ic:Q", title="平均Rank IC"),
+            xOffset="model:N",
+            color=alt.Color("model:N", title="模型", scale=alt.Scale(range=["#587A95", "#C8423B"])),
+            tooltip=[
+                alt.Tooltip("test_year:O", title="年份"),
+                alt.Tooltip("model:N", title="模型"),
+                alt.Tooltip("mean_rank_ic:Q", title="Rank IC", format=".3f"),
+            ],
+        ).properties(height=300)
+        st.altair_chart(yearly_chart)
+
+    with st.expander("训练、中性化与数据边界"):
+        st.markdown(
+            f"""
+            - 风险因子中性化：{factor_research_meta['risk_neutralization']}。
+            - 升级标准：{factor_research_meta['risk_model_promotion_rule']}。
+            - 历史回测每个建仓日只使用当时已完成持有期的样本重训，不使用未来数据。
+            - 当前模型训练截止：{rankings['model_training_end'].max().date()}。
+            - {factor_research_meta['universe_note']}
+            """
+        )
+    st.info(
+        "趋势分和风险分是两个独立维度：趋势分用于排研究优先级，风险分用于评估回撤与仓位，不应合并解释为买入概率。"
     )
-    st.warning(f"价格截至 {meta['as_of_date']}；估值字段截至 {meta.get('valuation_as_of_date', '未知')}，两者可能存在时点差异。看板用于研究和监控，不构成投资建议。", icon=":material/warning:")
+    st.warning(
+        f"价格截至 {meta['as_of_date']}。看板用于研究和监控，不构成投资建议。",
+        icon=":material/warning:",
+    )
