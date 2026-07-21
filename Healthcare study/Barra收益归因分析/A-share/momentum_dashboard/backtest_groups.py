@@ -16,8 +16,7 @@ DEFAULT_SOURCE_DIR = APP_DIR.parent / "Full version" / "universe"
 DATA_DIR = APP_DIR / "data"
 OVERHEAT_THRESHOLD = 90
 LOOKBACK_YEARS = 3
-FORWARD_SESSIONS = 20
-REBALANCE_SESSIONS = 20
+BACKTEST_HORIZONS = (5, 20, 120)
 
 
 def percentile(series: pd.Series) -> pd.Series:
@@ -90,6 +89,90 @@ def snapshot_metrics(
     return metrics
 
 
+def backtest_horizon(
+    prices: pd.DataFrame,
+    raw_prices: pd.DataFrame,
+    subindustry: pd.Series,
+    forward_sessions: int,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+    last_entry_date = prices.index[-forward_sessions - 1]
+    start_date = last_entry_date - pd.DateOffset(years=LOOKBACK_YEARS)
+    first_position = max(120, int(prices.index.searchsorted(start_date)))
+    # Anchor on the most recent eligible entry date, then step backwards in non-overlapping blocks.
+    last_position = len(prices) - forward_sessions - 1
+    positions = list(range(last_position, first_position - 1, -forward_sessions))[::-1]
+
+    observations = []
+    for position in positions:
+        metrics = snapshot_metrics(prices, raw_prices, position, subindustry)
+        entry_close = prices.iloc[position]
+        exit_close = prices.iloc[position + forward_sessions]
+        future_return = exit_close / entry_close - 1
+        future_path = prices.iloc[position + 1 : position + forward_sessions + 1].div(entry_close, axis=1) - 1
+        future_drawdown = future_path.min()
+        frame = metrics[["group", "momentum_score", "overheat_score"]].copy()
+        frame["entry_date"] = prices.index[position]
+        frame["exit_date"] = prices.index[position + forward_sessions]
+        frame["forward_return"] = future_return
+        frame["forward_drawdown"] = future_drawdown
+        frame.index.name = "ts_code"
+        observations.append(frame.reset_index())
+
+    detail = pd.concat(observations, ignore_index=True).dropna(
+        subset=["forward_return", "forward_drawdown"]
+    )
+    period_returns = (
+        detail.groupby(["entry_date", "exit_date", "group"], as_index=False)
+        .agg(
+            average_forward_return=("forward_return", "mean"),
+            average_forward_drawdown=("forward_drawdown", "mean"),
+            observation_count=("ts_code", "count"),
+        )
+    )
+    summary = (
+        period_returns.groupby("group", as_index=False)
+        .agg(
+            average_forward_return=("average_forward_return", "mean"),
+            median_period_return=("average_forward_return", "median"),
+            win_rate=("average_forward_return", lambda values: float((values > 0).mean())),
+            average_forward_drawdown=("average_forward_drawdown", "mean"),
+            rebalance_count=("entry_date", "nunique"),
+        )
+        .sort_values("group")
+    )
+    summary = summary.merge(
+        detail.groupby("group")["ts_code"].count().rename("observation_count"),
+        on="group",
+        how="left",
+    )
+    yearly = (
+        period_returns.assign(year=period_returns["entry_date"].dt.year)
+        .groupby(["year", "group"], as_index=False)
+        .agg(
+            average_forward_return=("average_forward_return", "mean"),
+            win_rate=("average_forward_return", lambda values: float((values > 0).mean())),
+            rebalance_count=("entry_date", "nunique"),
+        )
+    )
+    summary = summary.merge(
+        yearly.groupby("group")["average_forward_return"].std().rename("annual_average_dispersion"),
+        on="group",
+        how="left",
+    )
+    summary.insert(0, "horizon_sessions", forward_sessions)
+    yearly.insert(1, "horizon_sessions", forward_sessions)
+    metadata = {
+        "start_entry_date": detail["entry_date"].min().strftime("%Y-%m-%d"),
+        "end_entry_date": detail["entry_date"].max().strftime("%Y-%m-%d"),
+        "last_exit_date": detail["exit_date"].max().strftime("%Y-%m-%d"),
+        "forward_sessions": forward_sessions,
+        "rebalance_sessions": forward_sessions,
+        "rebalance_count": int(detail["entry_date"].nunique()),
+        "observation_count": int(len(detail)),
+    }
+    return summary, yearly, metadata
+
+
 def build_backtest(source_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     universe = pd.read_csv(
         source_dir / "a_share_healthcare_universe.csv",
@@ -104,78 +187,16 @@ def build_backtest(source_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     raw_prices = prices.copy()
     prices = prices.ffill(limit=3)
     subindustry = universe.set_index("ts_code")["healthcare_subindustry"]
-    last_entry_date = prices.index[-FORWARD_SESSIONS - 1]
-    start_date = last_entry_date - pd.DateOffset(years=LOOKBACK_YEARS)
-    first_position = max(120, int(prices.index.searchsorted(start_date)))
-    # Anchor on the most recent eligible entry date, then step backwards in non-overlapping blocks.
-    last_position = len(prices) - FORWARD_SESSIONS - 1
-    positions = list(range(last_position, first_position - 1, -REBALANCE_SESSIONS))[::-1]
 
-    observations = []
-    for position in positions:
-        metrics = snapshot_metrics(prices, raw_prices, position, subindustry)
-        entry_close = prices.iloc[position]
-        exit_close = prices.iloc[position + FORWARD_SESSIONS]
-        future_return = exit_close / entry_close - 1
-        future_path = prices.iloc[position + 1 : position + FORWARD_SESSIONS + 1].div(entry_close, axis=1) - 1
-        future_drawdown = future_path.min()
-        frame = metrics[["group", "momentum_score", "overheat_score"]].copy()
-        frame["entry_date"] = prices.index[position]
-        frame["exit_date"] = prices.index[position + FORWARD_SESSIONS]
-        frame["forward_20d_return"] = future_return
-        frame["forward_20d_drawdown"] = future_drawdown
-        frame.index.name = "ts_code"
-        observations.append(frame.reset_index())
-
-    detail = pd.concat(observations, ignore_index=True).dropna(
-        subset=["forward_20d_return", "forward_20d_drawdown"]
-    )
-    period_returns = (
-        detail.groupby(["entry_date", "exit_date", "group"], as_index=False)
-        .agg(
-            average_forward_20d_return=("forward_20d_return", "mean"),
-            average_forward_20d_drawdown=("forward_20d_drawdown", "mean"),
-            observation_count=("ts_code", "count"),
-        )
-    )
-    summary = (
-        period_returns.groupby("group", as_index=False)
-        .agg(
-            average_forward_20d_return=("average_forward_20d_return", "mean"),
-            median_forward_20d_return=("average_forward_20d_return", "median"),
-            win_rate=("average_forward_20d_return", lambda values: float((values > 0).mean())),
-            average_forward_20d_drawdown=("average_forward_20d_drawdown", "mean"),
-            rebalance_count=("entry_date", "nunique"),
-        )
-        .sort_values("group")
-    )
-    summary = summary.merge(
-        detail.groupby("group")["ts_code"].count().rename("observation_count"),
-        on="group",
-        how="left",
-    )
-    yearly = (
-        period_returns.assign(year=period_returns["entry_date"].dt.year)
-        .groupby(["year", "group"], as_index=False)
-        .agg(
-            average_forward_20d_return=("average_forward_20d_return", "mean"),
-            win_rate=("average_forward_20d_return", lambda values: float((values > 0).mean())),
-            rebalance_count=("entry_date", "nunique"),
-        )
-    )
-    summary = summary.merge(
-        yearly.groupby("group")["average_forward_20d_return"].std().rename("annual_average_dispersion"),
-        on="group",
-        how="left",
-    )
+    results = [
+        backtest_horizon(prices, raw_prices, subindustry, horizon)
+        for horizon in BACKTEST_HORIZONS
+    ]
+    summary = pd.concat([result[0] for result in results], ignore_index=True)
+    yearly = pd.concat([result[1] for result in results], ignore_index=True)
     metadata = {
-        "start_entry_date": detail["entry_date"].min().strftime("%Y-%m-%d"),
-        "end_entry_date": detail["entry_date"].max().strftime("%Y-%m-%d"),
-        "last_exit_date": detail["exit_date"].max().strftime("%Y-%m-%d"),
-        "forward_sessions": FORWARD_SESSIONS,
-        "rebalance_sessions": REBALANCE_SESSIONS,
-        "rebalance_count": int(detail["entry_date"].nunique()),
-        "observation_count": int(len(detail)),
+        "lookback_years": LOOKBACK_YEARS,
+        "horizons": {str(horizon): result[2] for horizon, result in zip(BACKTEST_HORIZONS, results)},
         "universe_note": "使用当前310只股票的历史数据，存在幸存者偏差。",
     }
     return summary, yearly, metadata

@@ -174,39 +174,59 @@ with overview_tab:
 
 with backtest_tab:
     st.subheader("过去三年A/B/C分组回测", anchor=False)
-    st.caption(
-        f"{group_backtest_meta['start_entry_date']}至{group_backtest_meta['end_entry_date']}，"
-        f"每{group_backtest_meta['rebalance_sessions']}个交易日形成一次非重叠组合，"
-        f"持有{group_backtest_meta['forward_sessions']}个交易日；每期先对组内股票等权，再跨期平均。"
+    selected_horizon = st.segmented_control(
+        "未来收益周期",
+        ["5日", "20日", "120日"],
+        default="20日",
+        required=True,
+        key="backtest_horizon",
     )
-    metrics_by_group = group_backtest.set_index("group")
+    horizon_sessions = int(selected_horizon.removesuffix("日"))
+    horizon_meta = group_backtest_meta["horizons"][str(horizon_sessions)]
+    horizon_summary = group_backtest[group_backtest["horizon_sessions"] == horizon_sessions].copy()
+    horizon_yearly = group_backtest_yearly[
+        group_backtest_yearly["horizon_sessions"] == horizon_sessions
+    ].copy()
+    st.caption(
+        f"{horizon_meta['start_entry_date']}至{horizon_meta['end_entry_date']}，"
+        f"每{horizon_sessions}个交易日形成一次非重叠组合并持有{horizon_sessions}个交易日；"
+        "每期先对组内股票等权，再跨期平均。"
+    )
+    metrics_by_group = horizon_summary.set_index("group")
     with st.container(horizontal=True):
         for group in ["A", "B", "C"]:
             result = metrics_by_group.loc[group]
             st.metric(
-                f"{group}组平均未来20日收益",
-                pct(result["average_forward_20d_return"]),
+                f"{group}组平均未来{horizon_sessions}日收益",
+                pct(result["average_forward_return"]),
                 f"胜率 {result['win_rate']:.1%}",
                 border=True,
             )
 
-    st.warning(
-        "过去三年样本中，A组的未来20日平均收益没有领先B/C组，且平均区间回撤更大。"
-        "因此A/B/C应理解为当前趋势状态标签，不应直接解释为未来收益评级。",
-        icon=":material/warning:",
-    )
+    if horizon_sessions == 120:
+        st.warning(
+            "120日周期只有6–7个独立调仓期，均值容易受少数时期影响；A组仍未领先B/C组，"
+            "但这一周期更适合视为方向性证据。",
+            icon=":material/warning:",
+        )
+    else:
+        st.warning(
+            f"过去三年样本中，A组的未来{horizon_sessions}日平均收益没有领先B/C组。"
+            "因此A/B/C应理解为当前趋势状态标签，不应直接解释为未来收益评级。",
+            icon=":material/warning:",
+        )
 
     chart_left, chart_right = st.columns(2, gap="medium")
     with chart_left.container(border=True):
         st.markdown("**全样本平均收益与回撤**")
-        backtest_long = group_backtest.melt(
+        backtest_long = horizon_summary.melt(
             id_vars=["group"],
-            value_vars=["average_forward_20d_return", "average_forward_20d_drawdown"],
+            value_vars=["average_forward_return", "average_forward_drawdown"],
             var_name="metric",
             value_name="value",
         )
         backtest_long["metric"] = backtest_long["metric"].map(
-            {"average_forward_20d_return": "平均收益", "average_forward_20d_drawdown": "平均最大回撤"}
+            {"average_forward_return": "平均收益", "average_forward_drawdown": "平均最大回撤"}
         )
         result_bars = alt.Chart(backtest_long).mark_bar().encode(
             x=alt.X("group:N", title="分组", sort=["A", "B", "C"]),
@@ -222,16 +242,16 @@ with backtest_tab:
         st.altair_chart(result_bars)
 
     with chart_right.container(border=True):
-        st.markdown("**按进入年份拆分的平均未来20日收益**")
-        yearly_bars = alt.Chart(group_backtest_yearly).mark_bar().encode(
+        st.markdown(f"**按进入年份拆分的平均未来{horizon_sessions}日收益**")
+        yearly_bars = alt.Chart(horizon_yearly).mark_bar().encode(
             x=alt.X("year:O", title="进入年份"),
-            y=alt.Y("average_forward_20d_return:Q", title="平均未来20日收益", axis=alt.Axis(format="%")),
+            y=alt.Y("average_forward_return:Q", title=f"平均未来{horizon_sessions}日收益", axis=alt.Axis(format="%")),
             xOffset="group:N",
             color=alt.Color("group:N", title="分组", scale=alt.Scale(domain=list(GROUP_COLORS), range=list(GROUP_COLORS.values()))),
             tooltip=[
                 alt.Tooltip("year:O", title="年份"),
                 alt.Tooltip("group:N", title="分组"),
-                alt.Tooltip("average_forward_20d_return:Q", title="平均收益", format=".2%"),
+                alt.Tooltip("average_forward_return:Q", title="平均收益", format=".2%"),
                 alt.Tooltip("win_rate:Q", title="组合胜率", format=".1%"),
                 alt.Tooltip("rebalance_count:Q", title="调仓期数"),
             ],
@@ -241,31 +261,32 @@ with backtest_tab:
     with st.container(border=True):
         st.markdown("**回测明细摘要**")
         st.dataframe(
-            group_backtest,
+            horizon_summary,
             hide_index=True,
             column_config={
+                "horizon_sessions": None,
                 "group": "分组",
-                "average_forward_20d_return": st.column_config.NumberColumn("平均未来20日收益", format="percent"),
-                "median_forward_20d_return": st.column_config.NumberColumn("期度收益中位数", format="percent"),
+                "average_forward_return": st.column_config.NumberColumn(f"平均未来{horizon_sessions}日收益", format="percent"),
+                "median_period_return": st.column_config.NumberColumn("期度收益中位数", format="percent"),
                 "win_rate": st.column_config.NumberColumn("组合胜率", format="percent"),
-                "average_forward_20d_drawdown": st.column_config.NumberColumn("平均最大回撤", format="percent"),
+                "average_forward_drawdown": st.column_config.NumberColumn("平均最大回撤", format="percent"),
                 "rebalance_count": "有效调仓期数",
                 "observation_count": "股票观测数",
                 "annual_average_dispersion": st.column_config.NumberColumn("年度均值离散度", format="percent"),
             },
         )
         st.caption(
-            f"最后一个组合于{group_backtest_meta['last_exit_date']}退出，共"
-            f"{group_backtest_meta['rebalance_count']}个调仓日期、{group_backtest_meta['observation_count']:,}个股票观测。"
+            f"最后一个组合于{horizon_meta['last_exit_date']}退出，共"
+            f"{horizon_meta['rebalance_count']}个调仓日期、{horizon_meta['observation_count']:,}个股票观测。"
         )
 
     with st.expander("回测规则与局限"):
         st.markdown(
             """
             - 每个历史时点只使用当时及此前价格，按当前完全相同的趋势分、过热分和A/B/C阈值重新分类。
-            - 主结果使用非重叠20日持有期；每个调仓日组内股票等权，不因某个月某组股票较多而获得更高权重。
+            - 5/20/120日都使用与持有期相同的调仓间隔，形成非重叠组合；每个调仓日组内股票等权。
             - 未计交易成本、停牌成交限制、涨跌停和冲击成本；当前310只股票池用于全部历史时期，存在幸存者偏差。
-            - A组在部分历史调仓日为空，因此有效期数少于B/C组。结果是历史描述，不构成未来收益承诺。
+            - A组在部分历史调仓日为空，因此有效期数少于B/C组；120日周期独立样本尤其有限。结果是历史描述，不构成未来收益承诺。
             """
         )
 
@@ -454,7 +475,7 @@ with method_tab:
         - **估值分**：PE_TTM和PB只在所属子行业内比较；正PE权重60%，正PB权重40%；负PE或缺失PE不被当作便宜，估值分会因有效字段不足而降权。
         - **研究信号**：强趋势低过热、强趋势高过热、估值便宜待确认、弱趋势/数据不足。它们是研究优先级，不是买卖评级。
         - **风险分**：追高风险、20日年化波动率和价格数据滞后度的组合；分数越高，风险越高。
-        - **A/B/C历史表现**：过去三年非重叠20日回测中，A组未表现出更高的未来收益，因此分组只描述当前趋势确认程度，不构成收益评级。
+        - **A/B/C历史表现**：过去三年非重叠5/20/120日回测中，A组均未表现出更高的平均未来收益，因此分组只描述当前趋势确认程度，不构成收益评级。
         - **质量分暂未启用**：当前快照没有ROE、营收增速、扣非利润增速和结构化新闻字段，因此看板不会假装拥有这些信息。
         """
     )
