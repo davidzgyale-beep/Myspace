@@ -17,6 +17,7 @@ DATA_DIR = APP_DIR / "data"
 HORIZONS = (5, 20, 60, 120)
 OOS_START_YEAR = 2023
 RIDGE_ALPHA = 5.0
+MIN_PROMOTION_REBALANCES = 20
 
 ALPHA_FACTORS = [
     "trend_5d",
@@ -28,12 +29,19 @@ ALPHA_FACTORS = [
     "liquidity_turnover_20d",
     "crowding_max_return_20d",
 ]
-RISK_FACTORS = [
+BASE_RISK_FACTORS = [
     "risk_volatility_20d",
     "risk_volatility_60d",
     "risk_drawdown_60d",
     "risk_max_return_20d",
 ]
+NEW_RISK_FACTORS = [
+    "risk_downside_volatility_60d",
+    "risk_residual_volatility_60d",
+    "risk_liquidity_pressure_60d",
+    "risk_cvar_60d",
+]
+RISK_FACTORS = BASE_RISK_FACTORS + NEW_RISK_FACTORS
 FACTOR_LABELS = {
     "trend_5d": "5日趋势",
     "trend_20d": "20日趋势",
@@ -47,6 +55,10 @@ FACTOR_LABELS = {
     "risk_volatility_60d": "60日波动率风险",
     "risk_drawdown_60d": "距60日高点回撤风险",
     "risk_max_return_20d": "20日最大单日涨幅风险",
+    "risk_downside_volatility_60d": "60日下行波动率风险",
+    "risk_residual_volatility_60d": "60日残差波动率风险",
+    "risk_liquidity_pressure_60d": "60日流动性压力",
+    "risk_cvar_60d": "60日尾部损失（CVaR）",
 }
 
 
@@ -123,6 +135,15 @@ def load_panels(source_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, dict[str,
     for column in ["turnover_rate", "pe_ttm", "pb", "total_mv"]:
         panel = basic.pivot(index="trade_date", columns="ts_code", values=column)
         panels[column] = panel.reindex(index=close.index, columns=close.columns).ffill(limit=5)
+    price_long = pd.read_csv(
+        source_dir / "a_share_healthcare_prices_long.csv",
+        usecols=["ts_code", "trade_date", "amount"],
+        parse_dates=["trade_date"],
+    )
+    amount = price_long.pivot(index="trade_date", columns="ts_code", values="amount")
+    panels["amount"] = amount.reindex(index=close.index, columns=close.columns).apply(
+        pd.to_numeric, errors="coerce"
+    )
     return universe, close, panels
 
 
@@ -149,6 +170,33 @@ def snapshot_features(
     frame["risk_volatility_60d"] = trailing_returns.std() * np.sqrt(252)
     frame["risk_drawdown_60d"] = -(current / prices.iloc[position - 59 : position + 1].max() - 1)
     frame["risk_max_return_20d"] = frame["crowding_max_return_20d"]
+    frame["risk_downside_volatility_60d"] = trailing_returns.where(trailing_returns < 0).std() * np.sqrt(252)
+
+    market_return = trailing_returns.mean(axis=1, skipna=True)
+    market_variance = market_return.var()
+    beta = trailing_returns.apply(lambda series: series.cov(market_return)).div(market_variance)
+    alpha = trailing_returns.mean().sub(beta * market_return.mean())
+    market_component = pd.DataFrame(
+        np.outer(market_return.to_numpy(), beta.to_numpy()),
+        index=trailing_returns.index,
+        columns=trailing_returns.columns,
+    )
+    residual_returns = trailing_returns.sub(market_component).sub(alpha, axis=1)
+    frame["risk_residual_volatility_60d"] = residual_returns.std() * np.sqrt(252)
+
+    trailing_amount = panels["amount"].iloc[position - 59 : position + 1]
+    amount_20d = trailing_amount.tail(20).mean().where(lambda x: x > 0)
+    amount_60d = trailing_amount.mean().where(lambda x: x > 0)
+    liquidity_dry_up = -np.log(amount_20d / amount_60d)
+    amihud = (trailing_returns.abs() / trailing_amount.where(trailing_amount > 0)).mean()
+    frame["risk_liquidity_pressure_60d"] = (
+        robust_zscore(liquidity_dry_up) + robust_zscore(np.log(amihud.where(amihud > 0)))
+    ) / 2
+
+    tail_count = max(1, int(np.ceil(len(trailing_returns) * 0.05)))
+    frame["risk_cvar_60d"] = -trailing_returns.apply(
+        lambda series: series.nsmallest(tail_count).mean() if series.notna().sum() >= 30 else np.nan
+    )
 
     for factor in ALPHA_FACTORS:
         frame[f"raw_{factor}"] = robust_zscore(frame[factor])
@@ -300,7 +348,8 @@ def out_of_sample_models(panel: pd.DataFrame, horizon: int) -> tuple[list[dict],
             continue
         for model, factors, target, pred_col in [
             ("收益模型", ALPHA_FACTORS, "forward_return", "predicted_return"),
-            ("回撤模型", RISK_FACTORS, "forward_drawdown_loss", "predicted_risk"),
+            ("基础回撤模型", BASE_RISK_FACTORS, "forward_drawdown_loss", "predicted_base_risk"),
+            ("增强回撤模型", RISK_FACTORS, "forward_drawdown_loss", "predicted_enhanced_risk"),
         ]:
             intercept, coefficients = fit_ridge(train, factors, target)
             test[pred_col] = predict(test, factors, intercept, coefficients)
@@ -325,25 +374,69 @@ def current_scores(
     daily_returns: pd.DataFrame,
     basic_panels: dict[str, pd.DataFrame],
     universe_by_code: pd.DataFrame,
+    model_selection: pd.DataFrame,
 ) -> pd.DataFrame:
     current = snapshot_features(len(prices) - 1, prices, daily_returns, basic_panels, universe_by_code)
     rows = []
     for horizon, panel in panels_by_horizon.items():
         available = panel[panel["exit_date"] <= prices.index[-1]].copy()
         return_intercept, return_coef = fit_ridge(available, ALPHA_FACTORS, "forward_return")
-        risk_intercept, risk_coef = fit_ridge(available, RISK_FACTORS, "forward_drawdown_loss")
+        selected_model = model_selection.loc[
+            model_selection["horizon_sessions"] == horizon, "selected_model"
+        ].iloc[0]
+        selected_factors = RISK_FACTORS if selected_model == "增强回撤模型" else BASE_RISK_FACTORS
+        risk_intercept, risk_coef = fit_ridge(available, selected_factors, "forward_drawdown_loss")
         result = current[["name", "healthcare_subindustry"]].copy()
         result["horizon_sessions"] = horizon
         result["expected_return_score"] = score_percentile(
             predict(current, ALPHA_FACTORS, return_intercept, return_coef)
         )
         result["drawdown_risk_score"] = score_percentile(
-            predict(current, RISK_FACTORS, risk_intercept, risk_coef)
+            predict(current, selected_factors, risk_intercept, risk_coef)
         )
+        result["risk_model_version"] = selected_model
         result["model_training_end"] = available["exit_date"].max()
         result.index.name = "ts_code"
         rows.append(result.reset_index())
     return pd.concat(rows, ignore_index=True)
+
+
+def select_risk_models(oos_yearly: pd.DataFrame, oos_summary: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for horizon in HORIZONS:
+        summary = oos_summary[oos_summary["horizon_sessions"] == horizon].set_index("model")
+        base = summary.loc["基础回撤模型"]
+        enhanced = summary.loc["增强回撤模型"]
+        yearly = oos_yearly[
+            (oos_yearly["horizon_sessions"] == horizon)
+            & oos_yearly["model"].isin(["基础回撤模型", "增强回撤模型"])
+        ].pivot(index="test_year", columns="model", values="mean_rank_ic")
+        improved_year_rate = (yearly["增强回撤模型"] > yearly["基础回撤模型"]).mean()
+        ic_improved = enhanced["mean_rank_ic"] > base["mean_rank_ic"]
+        spread_improved = enhanced["top_bottom_spread"] > base["top_bottom_spread"]
+        stability_passed = improved_year_rate >= 0.5
+        sample_passed = base["rebalance_count"] >= MIN_PROMOTION_REBALANCES
+        selected = (
+            "增强回撤模型"
+            if ic_improved and spread_improved and stability_passed and sample_passed
+            else "基础回撤模型"
+        )
+        rows.append(
+            {
+                "horizon_sessions": horizon,
+                "selected_model": selected,
+                "base_mean_rank_ic": base["mean_rank_ic"],
+                "enhanced_mean_rank_ic": enhanced["mean_rank_ic"],
+                "rank_ic_change": enhanced["mean_rank_ic"] - base["mean_rank_ic"],
+                "base_top_bottom_spread": base["top_bottom_spread"],
+                "enhanced_top_bottom_spread": enhanced["top_bottom_spread"],
+                "spread_change": enhanced["top_bottom_spread"] - base["top_bottom_spread"],
+                "improved_year_rate": improved_year_rate,
+                "sample_passed": sample_passed,
+                "promotion_passed": selected == "增强回撤模型",
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def aggregate_oos(metrics: pd.DataFrame) -> pd.DataFrame:
@@ -395,7 +488,10 @@ def run_research(source_dir: Path) -> None:
     oos_yearly = pd.DataFrame(oos_rows)
     coefficients = pd.DataFrame(coefficient_rows)
     oos_summary = aggregate_oos(oos_yearly)
-    scores = current_scores(panels_by_horizon, prices, daily_returns, basic_panels, universe_by_code)
+    model_selection = select_risk_models(oos_yearly, oos_summary)
+    scores = current_scores(
+        panels_by_horizon, prices, daily_returns, basic_panels, universe_by_code, model_selection
+    )
     metadata = {
         "data_start": close.index.min().strftime("%Y-%m-%d"),
         "data_end": close.index.max().strftime("%Y-%m-%d"),
@@ -404,6 +500,10 @@ def run_research(source_dir: Path) -> None:
         "ridge_alpha": RIDGE_ALPHA,
         "alpha_neutralization": "子行业哑变量 + 对数总市值 + 20日波动率",
         "risk_neutralization": "子行业哑变量 + 对数总市值；保留个股波动率作为风险信息",
+        "base_risk_factors": [FACTOR_LABELS[factor] for factor in BASE_RISK_FACTORS],
+        "new_risk_factors": [FACTOR_LABELS[factor] for factor in NEW_RISK_FACTORS],
+        "risk_model_promotion_rule": "平均样本外Rank IC提高、十分位回撤差扩大、至少半数测试年度IC改善、且不少于20个独立调仓期",
+        "risk_model_min_promotion_rebalances": MIN_PROMOTION_REBALANCES,
         "universe_note": "使用当前310只股票的历史数据，存在幸存者偏差。",
     }
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -414,6 +514,7 @@ def run_research(source_dir: Path) -> None:
         "model_oos_summary.csv": oos_summary,
         "model_coefficients.csv": coefficients,
         "model_current_scores.csv": scores,
+        "risk_model_selection.csv": model_selection,
     }
     for filename, frame in outputs.items():
         frame.to_csv(DATA_DIR / filename, index=False, encoding="utf-8-sig")

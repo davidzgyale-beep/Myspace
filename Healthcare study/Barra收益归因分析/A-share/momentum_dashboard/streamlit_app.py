@@ -33,13 +33,14 @@ def load_snapshot():
     model_oos = pd.read_csv(DATA_DIR / "model_oos_summary.csv")
     model_oos_yearly = pd.read_csv(DATA_DIR / "model_oos_yearly.csv")
     model_scores = pd.read_csv(DATA_DIR / "model_current_scores.csv", parse_dates=["model_training_end"])
+    risk_model_selection = pd.read_csv(DATA_DIR / "risk_model_selection.csv")
     factor_research_metadata = json.loads(
         (DATA_DIR / "factor_research_metadata.json").read_text(encoding="utf-8")
     )
     metadata = json.loads((DATA_DIR / "metadata.json").read_text(encoding="utf-8"))
     return (
         rankings, history, industries, group_backtest, group_backtest_yearly, group_backtest_metadata,
-        factor_research, factor_deciles, model_oos, model_oos_yearly, model_scores,
+        factor_research, factor_deciles, model_oos, model_oos_yearly, model_scores, risk_model_selection,
         factor_research_metadata, metadata,
     )
 
@@ -76,7 +77,7 @@ def apply_industry_batch() -> None:
 
 (
     rankings, history, industries, group_backtest, group_backtest_yearly, group_backtest_meta,
-    factor_research, factor_deciles, model_oos, model_oos_yearly, model_scores,
+    factor_research, factor_deciles, model_oos, model_oos_yearly, model_scores, risk_model_selection,
     factor_research_meta, meta,
 ) = load_snapshot()
 ALL_INDUSTRIES = sorted(rankings["healthcare_subindustry"].dropna().unique().tolist())
@@ -374,8 +375,11 @@ with model_tab:
     )
     model_horizon = int(model_horizon_label.removesuffix("日"))
     model_summary = model_oos[model_oos["horizon_sessions"] == model_horizon].set_index("model")
+    selection_result = risk_model_selection[
+        risk_model_selection["horizon_sessions"] == model_horizon
+    ].iloc[0]
     return_result = model_summary.loc["收益模型"]
-    risk_result = model_summary.loc["回撤模型"]
+    risk_result = model_summary.loc[selection_result["selected_model"]]
     with st.container(horizontal=True):
         st.metric("收益模型样本外IC", f"{return_result['mean_rank_ic']:.3f}", border=True)
         st.metric("收益最高-最低十分位", pct(return_result["top_bottom_spread"]), border=True)
@@ -387,6 +391,27 @@ with model_tab:
             "更适合用于排除高风险股票。",
             icon=":material/warning:",
         )
+
+    comparison_view = model_summary.loc[["基础回撤模型", "增强回撤模型"]].reset_index()
+    with st.container(border=True):
+        st.markdown("**基础与增强回撤模型比较**")
+        st.dataframe(
+            comparison_view[["model", "mean_rank_ic", "top_bottom_spread", "positive_year_rate", "rebalance_count"]],
+            hide_index=True,
+            column_config={
+                "model": "模型", "mean_rank_ic": st.column_config.NumberColumn("样本外Rank IC", format="%.3f"),
+                "top_bottom_spread": st.column_config.NumberColumn("高低风险回撤差", format="percent"),
+                "positive_year_rate": st.column_config.NumberColumn("年度IC为正比例", format="percent"),
+                "rebalance_count": "独立调仓期",
+            },
+        )
+        if selection_result["promotion_passed"]:
+            st.success(f"增强模型通过升级标准，当前正式风险分使用{selection_result['selected_model']}。")
+        else:
+            st.info(
+                "四个新因子已保留在研究层，但增强模型未同时满足IC、十分位差、跨年稳定性和样本门槛，"
+                "当前正式风险分继续使用基础模型。"
+            )
 
     yearly_view = model_oos_yearly[model_oos_yearly["horizon_sessions"] == model_horizon].copy()
     with st.container(border=True):
@@ -426,7 +451,9 @@ with model_tab:
             - 每个测试年度只使用该年度开始前已经结束持有期的样本训练，样本外从{factor_research_meta['oos_start_year']}年开始。
             - 收益模型和回撤模型分别训练，均使用带L2约束的线性模型；没有把回撤风险硬混入收益预测。
             - 收益因子中性化：{factor_research_meta['alpha_neutralization']}。
+            - 新增候选因子：{'、'.join(factor_research_meta['new_risk_factors'])}。
             - 风险因子中性化：{factor_research_meta['risk_neutralization']}。
+            - 升级标准：{factor_research_meta['risk_model_promotion_rule']}。
             - 当前股票池回看历史仍有幸存者偏差，未计交易成本、涨跌停、停牌和冲击成本。
             """
         )
