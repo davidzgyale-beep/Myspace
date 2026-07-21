@@ -213,7 +213,8 @@ with st.sidebar:
     market_cap_range = st.slider("总市值（亿元）", 0, market_cap_max, (0, market_cap_max), 10)
     search = st.text_input("搜索股票", placeholder="输入名称或代码")
     st.caption(
-        f"行情截止 {meta['as_of_date']} · 风险口径 {RISK_HORIZON}日最大不利波动（MAE）"
+        f"行情截止 {meta['as_of_date']} · 趋势口径 固定公式100分制 · "
+        f"风险口径 {RISK_HORIZON}日最大不利波动（MAE）"
     )
 
 filtered = rankings[
@@ -232,7 +233,8 @@ if search:
 st.title(":material/query_stats: A股医疗趋势看板")
 st.caption(
     f"覆盖 {meta['stock_count']} 只股票、{meta['subindustry_count']} 个子行业。"
-    "只保留两个判断维度：趋势分表示相对强弱，风险分表示未来20日最大不利波动的相对排名。"
+    "趋势分使用理论满分100分的固定公式；"
+    "风险分表示未来20日最大不利波动的相对排名。"
 )
 
 with st.container(horizontal=True):
@@ -650,12 +652,17 @@ with compare_tab:
 
 with method_tab:
     st.subheader("评分方法", anchor=False)
+    with st.container(horizontal=True):
+        st.metric("趋势分理论满分", "100", border=True)
+        st.metric("收益窗口合计", "90分", border=True)
+        st.metric("趋势确认合计", "10分", border=True)
+        st.metric("强趋势门槛", "70分", border=True)
     trend_col, risk_col = st.columns(2, gap="medium")
     with trend_col.container(border=True):
         st.markdown("**趋势分：描述过去价格强弱**")
         st.markdown(
             """
-            趋势分是0–100的相对排名分，不是未来收益概率。收益率先分别计算全310只股票和所属子行业内的百分位，然后合成：
+            趋势分是固定公式的0–100分，理论满分为100，不是未来收益概率。收益率先分别计算全310只股票和所属子行业内的百分位，再按固定权重合成：
 
             | 因子 | 权重 |
             |---|---:|
@@ -666,8 +673,15 @@ with method_tab:
             | 相对MA20位置 | 5% |
             | 距60日高点位置 | 5% |
 
-            四个收益窗口中，全股票池排名贡献65%，子行业内排名贡献25%；均线与高点确认合计10%。
+            四个收益窗口合计贡献90分：全股票池排名合计65分，子行业内排名合计25分；均线与高点确认合计10分。该公式不会再按当日分数分布做二次映射。
             """
+        )
+        st.code(
+            "趋势分 = 65 x 全市场收益排名组合\n"
+            "       + 25 x 子行业收益排名组合\n"
+            "       +  5 x MA20位置得分\n"
+            "       +  5 x 60日高点位置得分",
+            language=None,
         )
         st.write("趋势分档：强趋势 ≥70 · 中趋势 40–70 · 弱趋势 <40")
 

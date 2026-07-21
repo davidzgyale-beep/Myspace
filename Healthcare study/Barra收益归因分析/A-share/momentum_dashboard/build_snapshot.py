@@ -130,12 +130,21 @@ def build_snapshot(source_dir: Path) -> None:
 
     return_cols = ["ret_5d", "ret_20d", "ret_60d", "ret_120d"]
     weights = {"ret_5d": 0.10, "ret_20d": 0.30, "ret_60d": 0.35, "ret_120d": 0.15}
+    return_weight_total = sum(weights.values())
     for col in return_cols:
         metrics[f"{col}_market_pct"] = percentile(metrics[col])
         metrics[f"{col}_sub_pct"] = metrics.groupby("healthcare_subindustry", dropna=False)[col].transform(percentile)
 
-    market_component = sum(metrics[f"{col}_market_pct"] * weight for col, weight in weights.items())
-    sub_component = sum(metrics[f"{col}_sub_pct"] * weight for col, weight in weights.items())
+    # Normalize the four return windows within their 90-point allocation so the
+    # fixed formula has an exact theoretical maximum of 100 points.
+    market_component = sum(
+        metrics[f"{col}_market_pct"] * weight / return_weight_total
+        for col, weight in weights.items()
+    )
+    sub_component = sum(
+        metrics[f"{col}_sub_pct"] * weight / return_weight_total
+        for col, weight in weights.items()
+    )
     trend_component = (
         metrics["ma20_gap"].clip(-0.20, 0.20).add(0.20).div(0.40) * 0.05
         + metrics["drawdown_60d"].clip(-0.30, 0).add(0.30).div(0.30) * 0.05
@@ -208,7 +217,7 @@ def build_snapshot(source_dir: Path) -> None:
         "subindustry_count": int(metrics["healthcare_subindustry"].nunique()),
         "price_history_start": history["trade_date"].min().strftime("%Y-%m-%d"),
         "valuation_as_of_date": valuation_date.strftime("%Y-%m-%d") if pd.notna(valuation_date) else None,
-        "methodology_version": "1.4.0",
+        "methodology_version": "1.5.0-fixed-100-point-trend",
     }
     (DATA_DIR / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"Built dashboard snapshot for {len(metrics)} stocks as of {metadata['as_of_date']}")

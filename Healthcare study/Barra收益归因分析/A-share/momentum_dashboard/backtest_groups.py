@@ -49,6 +49,7 @@ def momentum_metrics(
     close = prices.iloc[position]
     metrics = pd.DataFrame(index=prices.columns)
     weights = {"ret_5d": 0.10, "ret_20d": 0.30, "ret_60d": 0.35, "ret_120d": 0.15}
+    return_weight_total = sum(weights.values())
     for column, weight in weights.items():
         sessions = int(column.split("_")[1][:-1])
         metrics[column] = trailing_return(prices, position, sessions)
@@ -60,10 +61,12 @@ def momentum_metrics(
     metrics["ma20_gap"] = close / ma20 - 1
     metrics["drawdown_60d"] = close / high60 - 1
     market_component = sum(
-        metrics[f"{column}_market_pct"] * weight for column, weight in weights.items()
+        metrics[f"{column}_market_pct"] * weight / return_weight_total
+        for column, weight in weights.items()
     )
     subindustry_component = sum(
-        metrics[f"{column}_sub_pct"] * weight for column, weight in weights.items()
+        metrics[f"{column}_sub_pct"] * weight / return_weight_total
+        for column, weight in weights.items()
     )
     trend_component = (
         metrics["ma20_gap"].clip(-0.20, 0.20).add(0.20).div(0.40) * 0.05
@@ -400,12 +403,13 @@ def build_backtest(
         ignore_index=True,
     )
     metadata = {
-        "methodology_version": "trend_plus_survivorship_free_7factor_mae_risk_v3",
+        "methodology_version": "fixed_100_point_trend_plus_survivorship_free_7factor_mae_risk_v4",
         "lookback_years": LOOKBACK_YEARS,
         "risk_model_horizon": RISK_MODEL_HORIZON,
         "risk_model": "动态申万历史7因子-Ridge",
         "risk_training_rule": "每个建仓日仅使用该日前已完成20日持有期的动态申万医疗历史成员样本滚动重训",
         "risk_target_definition": "max(0, -min(未来持有期收益路径))；价格从未跌破建仓价时记为0",
+        "trend_score_definition": "固定理论满分100分；5/20/60/120日收益率分别贡献10/30/35/15分（其中全市场排名合计65分、子行业排名合计25分），MA20与60日高点位置各5分",
         "overheat_definition": "20日最大不利波动（MAE）风险预测横截面百分位不低于90",
         "group_rules": {
             "A": "趋势分>=70且过热分<90",
