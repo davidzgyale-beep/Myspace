@@ -406,10 +406,14 @@ with model_tab:
             },
         )
         if selection_result["promotion_passed"]:
-            st.success(f"增强模型通过升级标准，当前正式风险分使用{selection_result['selected_model']}。")
+            st.success(
+                f"增强模型通过升级标准，当前正式风险分使用{selection_result['selected_model']}；"
+                f"Rank IC提升 {selection_result['rank_ic_change']:.3f}，"
+                f"高低风险回撤差扩大 {selection_result['spread_change']:.2%}。"
+            )
         else:
             st.info(
-                "四个新因子已保留在研究层，但增强模型未同时满足IC、十分位差、跨年稳定性和样本门槛，"
+                "新增风险因子已保留在研究层，但增强模型未同时满足IC、十分位差、跨年稳定性和样本门槛，"
                 "当前正式风险分继续使用基础模型。"
             )
 
@@ -451,7 +455,9 @@ with model_tab:
             - 每个测试年度只使用该年度开始前已经结束持有期的样本训练，样本外从{factor_research_meta['oos_start_year']}年开始。
             - 收益模型和回撤模型分别训练，均使用带L2约束的线性模型；没有把回撤风险硬混入收益预测。
             - 收益因子中性化：{factor_research_meta['alpha_neutralization']}。
-            - 新增候选因子：{'、'.join(factor_research_meta['new_risk_factors'])}。
+            - 第一批候选因子：{'、'.join(factor_research_meta['first_wave_risk_factors'])}。
+            - 第二批候选因子：{'、'.join(factor_research_meta['second_wave_risk_factors'])}。
+            - Beta基准：市场使用{factor_research_meta['market_beta_benchmark']}；医疗板块使用{factor_research_meta['healthcare_beta_benchmark']}。
             - 风险因子中性化：{factor_research_meta['risk_neutralization']}。
             - 升级标准：{factor_research_meta['risk_model_promotion_rule']}。
             - 当前股票池回看历史仍有幸存者偏差，未计交易成本、涨跌停、停牌和冲击成本。

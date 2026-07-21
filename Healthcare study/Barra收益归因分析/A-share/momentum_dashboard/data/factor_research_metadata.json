@@ -17,12 +17,34 @@
     "距60日高点回撤风险",
     "20日最大单日涨幅风险"
   ],
-  "new_risk_factors": [
+  "first_wave_risk_factors": [
     "60日下行波动率风险",
     "60日残差波动率风险",
     "60日流动性压力",
     "60日尾部损失（CVaR）"
   ],
+  "second_wave_risk_factors": [
+    "60日沪深300 Beta",
+    "60日医疗板块Beta",
+    "涨停与极端上涨风险",
+    "跳空与极端下跌风险",
+    "拥挤度季度变化",
+    "20日日内振幅/ATR"
+  ],
+  "new_risk_factors": [
+    "60日下行波动率风险",
+    "60日残差波动率风险",
+    "60日流动性压力",
+    "60日尾部损失（CVaR）",
+    "60日沪深300 Beta",
+    "60日医疗板块Beta",
+    "涨停与极端上涨风险",
+    "跳空与极端下跌风险",
+    "拥挤度季度变化",
+    "20日日内振幅/ATR"
+  ],
+  "market_beta_benchmark": "沪深300（000300.SH）",
+  "healthcare_beta_benchmark": "当前医疗股票池等权日收益",
   "risk_model_promotion_rule": "平均样本外Rank IC提高、十分位回撤差扩大、至少半数测试年度IC改善、且不少于20个独立调仓期",
   "risk_model_min_promotion_rebalances": 20,
   "universe_note": "使用当前310只股票的历史数据，存在幸存者偏差。"

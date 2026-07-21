@@ -41,7 +41,15 @@ NEW_RISK_FACTORS = [
     "risk_liquidity_pressure_60d",
     "risk_cvar_60d",
 ]
-RISK_FACTORS = BASE_RISK_FACTORS + NEW_RISK_FACTORS
+SECOND_WAVE_RISK_FACTORS = [
+    "risk_market_beta_60d",
+    "risk_healthcare_beta_60d",
+    "risk_limit_up_extreme_up_60d",
+    "risk_gap_extreme_down_60d",
+    "risk_crowding_quarter_change",
+    "risk_intraday_atr_20d",
+]
+RISK_FACTORS = BASE_RISK_FACTORS + NEW_RISK_FACTORS + SECOND_WAVE_RISK_FACTORS
 FACTOR_LABELS = {
     "trend_5d": "5日趋势",
     "trend_20d": "20日趋势",
@@ -59,6 +67,12 @@ FACTOR_LABELS = {
     "risk_residual_volatility_60d": "60日残差波动率风险",
     "risk_liquidity_pressure_60d": "60日流动性压力",
     "risk_cvar_60d": "60日尾部损失（CVaR）",
+    "risk_market_beta_60d": "60日沪深300 Beta",
+    "risk_healthcare_beta_60d": "60日医疗板块Beta",
+    "risk_limit_up_extreme_up_60d": "涨停与极端上涨风险",
+    "risk_gap_extreme_down_60d": "跳空与极端下跌风险",
+    "risk_crowding_quarter_change": "拥挤度季度变化",
+    "risk_intraday_atr_20d": "20日日内振幅/ATR",
 }
 
 
@@ -115,7 +129,9 @@ def neutralize_risk(frame: pd.DataFrame, factor: str) -> pd.Series:
     return robust_zscore(residual)
 
 
-def load_panels(source_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, pd.DataFrame]]:
+def load_panels(
+    source_dir: Path,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, pd.DataFrame], pd.Series]:
     universe = pd.read_csv(
         source_dir / "a_share_healthcare_universe.csv",
         usecols=["ts_code", "name", "healthcare_subindustry"],
@@ -137,20 +153,26 @@ def load_panels(source_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, dict[str,
         panels[column] = panel.reindex(index=close.index, columns=close.columns).ffill(limit=5)
     price_long = pd.read_csv(
         source_dir / "a_share_healthcare_prices_long.csv",
-        usecols=["ts_code", "trade_date", "amount"],
+        usecols=["ts_code", "trade_date", "open_qfq", "high_qfq", "low_qfq", "close_qfq", "amount"],
         parse_dates=["trade_date"],
     )
-    amount = price_long.pivot(index="trade_date", columns="ts_code", values="amount")
-    panels["amount"] = amount.reindex(index=close.index, columns=close.columns).apply(
-        pd.to_numeric, errors="coerce"
-    )
-    return universe, close, panels
+    for column in ["open_qfq", "high_qfq", "low_qfq", "close_qfq", "amount"]:
+        panel = price_long.pivot(index="trade_date", columns="ts_code", values=column)
+        panels[column] = panel.reindex(index=close.index, columns=close.columns).apply(
+            pd.to_numeric, errors="coerce"
+        )
+    benchmark = pd.read_csv(DATA_DIR / "market_benchmark.csv", parse_dates=["trade_date"])
+    benchmark_close = pd.to_numeric(
+        benchmark.set_index("trade_date")["close"], errors="coerce"
+    ).reindex(close.index)
+    return universe, close, panels, benchmark_close
 
 
 def snapshot_features(
     position: int,
     prices: pd.DataFrame,
     daily_returns: pd.DataFrame,
+    market_returns: pd.Series,
     panels: dict[str, pd.DataFrame],
     universe_by_code: pd.DataFrame,
 ) -> pd.DataFrame:
@@ -198,6 +220,58 @@ def snapshot_features(
         lambda series: series.nsmallest(tail_count).mean() if series.notna().sum() >= 30 else np.nan
     )
 
+    # The healthcare-universe equal-weight return is the sector benchmark available consistently since 2019.
+    frame["risk_healthcare_beta_60d"] = beta
+    trailing_market_return = market_returns.iloc[position - 59 : position + 1]
+    market_beta = trailing_returns.apply(lambda series: series.cov(trailing_market_return)).div(
+        trailing_market_return.var()
+    )
+    frame["risk_market_beta_60d"] = market_beta
+    extreme_up = trailing_returns >= 0.095
+    frame["risk_limit_up_extreme_up_60d"] = (
+        extreme_up.sum() + trailing_returns.clip(lower=0).max().mul(5)
+    )
+
+    trailing_open = panels["open_qfq"].iloc[position - 59 : position + 1]
+    trailing_high = panels["high_qfq"].iloc[position - 59 : position + 1]
+    trailing_low = panels["low_qfq"].iloc[position - 59 : position + 1]
+    trailing_close = panels["close_qfq"].iloc[position - 59 : position + 1]
+    previous_close = trailing_close.shift(1)
+    gap_down = (trailing_open / previous_close - 1).where(lambda x: x < 0)
+    extreme_down = trailing_returns.where(trailing_returns < 0)
+    frame["risk_gap_extreme_down_60d"] = (
+        -gap_down.min().fillna(0)
+        + -extreme_down.min().fillna(0)
+        + (trailing_returns <= -0.095).sum().mul(0.05)
+    )
+
+    quarter_turnover = panels["turnover_rate"].iloc[position - 119 : position + 1]
+    quarter_amount = panels["amount"].iloc[position - 119 : position + 1]
+    turnover_change = np.log(
+        quarter_turnover.tail(20).mean().where(lambda x: x > 0)
+        / quarter_turnover.head(60).mean().where(lambda x: x > 0)
+    )
+    amount_change = np.log(
+        quarter_amount.tail(20).mean().where(lambda x: x > 0)
+        / quarter_amount.head(60).mean().where(lambda x: x > 0)
+    )
+    frame["risk_crowding_quarter_change"] = (
+        robust_zscore(turnover_change) + robust_zscore(amount_change)
+    ) / 2
+
+    true_range = pd.DataFrame(
+        np.maximum.reduce(
+            [
+                (trailing_high - trailing_low).to_numpy(),
+                (trailing_high - previous_close).abs().to_numpy(),
+                (trailing_low - previous_close).abs().to_numpy(),
+            ]
+        ),
+        index=trailing_high.index,
+        columns=trailing_high.columns,
+    )
+    frame["risk_intraday_atr_20d"] = true_range.tail(20).mean().div(trailing_close.tail(20).mean())
+
     for factor in ALPHA_FACTORS:
         frame[f"raw_{factor}"] = robust_zscore(frame[factor])
         frame[factor] = neutralize_alpha(frame, factor)
@@ -212,6 +286,7 @@ def build_horizon_panel(
     horizon: int,
     prices: pd.DataFrame,
     daily_returns: pd.DataFrame,
+    market_returns: pd.Series,
     panels: dict[str, pd.DataFrame],
     universe_by_code: pd.DataFrame,
 ) -> pd.DataFrame:
@@ -220,7 +295,9 @@ def build_horizon_panel(
     positions = range(first_position, last_position + 1, horizon)
     rows = []
     for position in positions:
-        features = snapshot_features(position, prices, daily_returns, panels, universe_by_code)
+        features = snapshot_features(
+            position, prices, daily_returns, market_returns, panels, universe_by_code
+        )
         entry = prices.iloc[position]
         path = prices.iloc[position + 1 : position + horizon + 1].div(entry, axis=1) - 1
         features["entry_date"] = prices.index[position]
@@ -372,11 +449,14 @@ def current_scores(
     panels_by_horizon: dict[int, pd.DataFrame],
     prices: pd.DataFrame,
     daily_returns: pd.DataFrame,
+    market_returns: pd.Series,
     basic_panels: dict[str, pd.DataFrame],
     universe_by_code: pd.DataFrame,
     model_selection: pd.DataFrame,
 ) -> pd.DataFrame:
-    current = snapshot_features(len(prices) - 1, prices, daily_returns, basic_panels, universe_by_code)
+    current = snapshot_features(
+        len(prices) - 1, prices, daily_returns, market_returns, basic_panels, universe_by_code
+    )
     rows = []
     for horizon, panel in panels_by_horizon.items():
         available = panel[panel["exit_date"] <= prices.index[-1]].copy()
@@ -464,9 +544,10 @@ def aggregate_oos(metrics: pd.DataFrame) -> pd.DataFrame:
 
 
 def run_research(source_dir: Path) -> None:
-    universe, close, basic_panels = load_panels(source_dir)
+    universe, close, basic_panels, benchmark_close = load_panels(source_dir)
     prices = close.ffill(limit=3)
     daily_returns = prices.pct_change(fill_method=None)
+    market_returns = benchmark_close.pct_change(fill_method=None)
     universe_by_code = universe.set_index("ts_code")
     factor_rows: list[dict] = []
     decile_rows: list[dict] = []
@@ -474,7 +555,9 @@ def run_research(source_dir: Path) -> None:
     coefficient_rows: list[dict] = []
     panels_by_horizon: dict[int, pd.DataFrame] = {}
     for horizon in HORIZONS:
-        panel = build_horizon_panel(horizon, prices, daily_returns, basic_panels, universe_by_code)
+        panel = build_horizon_panel(
+            horizon, prices, daily_returns, market_returns, basic_panels, universe_by_code
+        )
         panels_by_horizon[horizon] = panel
         factor_result, decile_result = single_factor_tests(panel, horizon)
         oos_result, coefficient_result = out_of_sample_models(panel, horizon)
@@ -490,7 +573,8 @@ def run_research(source_dir: Path) -> None:
     oos_summary = aggregate_oos(oos_yearly)
     model_selection = select_risk_models(oos_yearly, oos_summary)
     scores = current_scores(
-        panels_by_horizon, prices, daily_returns, basic_panels, universe_by_code, model_selection
+        panels_by_horizon, prices, daily_returns, market_returns, basic_panels, universe_by_code,
+        model_selection,
     )
     metadata = {
         "data_start": close.index.min().strftime("%Y-%m-%d"),
@@ -501,7 +585,13 @@ def run_research(source_dir: Path) -> None:
         "alpha_neutralization": "子行业哑变量 + 对数总市值 + 20日波动率",
         "risk_neutralization": "子行业哑变量 + 对数总市值；保留个股波动率作为风险信息",
         "base_risk_factors": [FACTOR_LABELS[factor] for factor in BASE_RISK_FACTORS],
-        "new_risk_factors": [FACTOR_LABELS[factor] for factor in NEW_RISK_FACTORS],
+        "first_wave_risk_factors": [FACTOR_LABELS[factor] for factor in NEW_RISK_FACTORS],
+        "second_wave_risk_factors": [FACTOR_LABELS[factor] for factor in SECOND_WAVE_RISK_FACTORS],
+        "new_risk_factors": [
+            FACTOR_LABELS[factor] for factor in NEW_RISK_FACTORS + SECOND_WAVE_RISK_FACTORS
+        ],
+        "market_beta_benchmark": "沪深300（000300.SH）",
+        "healthcare_beta_benchmark": "当前医疗股票池等权日收益",
         "risk_model_promotion_rule": "平均样本外Rank IC提高、十分位回撤差扩大、至少半数测试年度IC改善、且不少于20个独立调仓期",
         "risk_model_min_promotion_rebalances": MIN_PROMOTION_REBALANCES,
         "universe_note": "使用当前310只股票的历史数据，存在幸存者偏差。",
