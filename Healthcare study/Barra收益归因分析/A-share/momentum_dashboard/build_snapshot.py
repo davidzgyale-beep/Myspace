@@ -16,6 +16,7 @@ DEFAULT_SOURCE_DIR = APP_DIR.parent / "Full version" / "universe"
 DATA_DIR = APP_DIR / "data"
 TARGET_COUNT = 310
 OVERHEAT_THRESHOLD = 90
+MARKET_CAP_THRESHOLD_100M = 100
 
 
 def percentile(series: pd.Series) -> pd.Series:
@@ -162,6 +163,31 @@ def build_snapshot(source_dir: Path) -> None:
         + metrics["valuation_score"].fillna(50) * 0.25
         + (100 - metrics["risk_score"]) * 0.15
     ).clip(0, 100)
+    metrics["market_cap_segment"] = np.where(
+        metrics["market_cap_100m"] < MARKET_CAP_THRESHOLD_100M,
+        "小市值（<100亿）",
+        "中大市值（≥100亿）",
+    )
+    metrics["segment_weight_profile"] = np.where(
+        metrics["market_cap_100m"] < MARKET_CAP_THRESHOLD_100M,
+        "趋势50%·安全40%·估值10%",
+        "趋势40%·安全40%·估值20%",
+    )
+    valuation_neutral = metrics["valuation_score"].fillna(50)
+    safety_score = 100 - metrics["risk_score"]
+    small_cap_score = metrics["momentum_score"] * 0.50 + safety_score * 0.40 + valuation_neutral * 0.10
+    large_cap_score = metrics["momentum_score"] * 0.40 + safety_score * 0.40 + valuation_neutral * 0.20
+    metrics["market_cap_adjusted_score"] = np.where(
+        metrics["market_cap_100m"] < MARKET_CAP_THRESHOLD_100M,
+        small_cap_score,
+        large_cap_score,
+    ).clip(0, 100)
+    metrics["market_cap_segment_rank"] = (
+        metrics.groupby("market_cap_segment")["market_cap_adjusted_score"]
+        .rank(method="min", ascending=False)
+        .astype("Int64")
+    )
+    metrics["market_cap_segment_count"] = metrics.groupby("market_cap_segment")["ts_code"].transform("count")
     metrics["temperature"] = metrics.apply(classify_temperature, axis=1)
     metrics["group"] = metrics.apply(classify_group, axis=1)
     metrics["signal_label"] = np.select(
@@ -208,7 +234,9 @@ def build_snapshot(source_dir: Path) -> None:
         "subindustry_count": int(metrics["healthcare_subindustry"].nunique()),
         "price_history_start": history["trade_date"].min().strftime("%Y-%m-%d"),
         "valuation_as_of_date": valuation_date.strftime("%Y-%m-%d") if pd.notna(valuation_date) else None,
-        "methodology_version": "1.2.0",
+        "methodology_version": "1.3.0",
+        "market_cap_threshold_100m": MARKET_CAP_THRESHOLD_100M,
+        "market_cap_method_note": "100亿元接近当前样本中位数，是样本均衡的操作性分界，并非被证明的结构断点。",
     }
     (DATA_DIR / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"Built dashboard snapshot for {len(metrics)} stocks as of {metadata['as_of_date']}")
