@@ -1,0 +1,10 @@
+{
+  "universe_definition": "调仓日有效的申万医药生物一级行业历史成员",
+  "membership_rule": "in_date <= 调仓日 <= out_date；out_date为空则持续有效",
+  "membership_unique_codes_2019_2026": 516,
+  "target": "max(0, -min(未来20日相对入场价收益路径))",
+  "delisting_treatment": "退市或停止交易后按最后可交易前复权价格持有现金至20日结束",
+  "oos_start_year": 2023,
+  "research_period_contaminated": true,
+  "production_model_unchanged": true
+}

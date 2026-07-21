@@ -11,10 +11,10 @@ import numpy as np
 import pandas as pd
 
 from factor_research import (
-    RISK_FACTORS,
-    build_horizon_panel,
+    PRODUCTION_RISK_FACTORS,
     fit_ridge,
     load_panels,
+    maximum_adverse_excursion,
     predict,
     score_percentile,
     snapshot_features,
@@ -138,13 +138,14 @@ def build_risk_training_panel(
     panels: dict[str, pd.DataFrame],
     universe_by_code: pd.DataFrame,
 ) -> pd.DataFrame:
-    return build_horizon_panel(
-        RISK_MODEL_HORIZON,
-        prices,
-        daily_returns,
-        market_returns,
-        panels,
-        universe_by_code,
+    panel_path = DATA_DIR / "survivorship_free_training_panel.csv.gz"
+    if not panel_path.exists():
+        raise FileNotFoundError(
+            "Run test_survivorship_free_risk_model.py before rebuilding dashboard backtests"
+        )
+    return pd.read_csv(
+        panel_path,
+        parse_dates=["entry_date", "exit_date"],
     )
 
 
@@ -161,11 +162,15 @@ def historical_risk_score(
     train = training_panel[training_panel["exit_date"] <= entry_date].copy()
     if len(train) < 500:
         raise ValueError(f"Insufficient risk-model training data at {entry_date.date()}: {len(train)}")
-    intercept, coefficients = fit_ridge(train, RISK_FACTORS, "forward_drawdown_loss")
+    intercept, coefficients = fit_ridge(
+        train, PRODUCTION_RISK_FACTORS, "forward_drawdown_loss"
+    )
     current = snapshot_features(
         position, prices, daily_returns, market_returns, panels, universe_by_code
     )
-    risk_score = score_percentile(predict(current, RISK_FACTORS, intercept, coefficients))
+    risk_score = score_percentile(
+        predict(current, PRODUCTION_RISK_FACTORS, intercept, coefficients)
+    )
     return risk_score, train["exit_date"].max(), int(train["entry_date"].nunique())
 
 
@@ -268,7 +273,7 @@ def backtest_horizon(
         frame["risk_training_end"] = training_end
         frame["risk_training_periods"] = training_periods
         frame["forward_return"] = future_return
-        frame["forward_drawdown"] = future_path.min()
+        frame["forward_drawdown"] = -maximum_adverse_excursion(future_path)
         frame["price_available"] = raw_prices.iloc[position].notna()
         frame.index.name = "ts_code"
         observations.append(frame.reset_index())
@@ -395,12 +400,13 @@ def build_backtest(
         ignore_index=True,
     )
     metadata = {
-        "methodology_version": "simplified_trend_plus_20d_enhanced_drawdown_risk_v1",
+        "methodology_version": "trend_plus_survivorship_free_7factor_mae_risk_v3",
         "lookback_years": LOOKBACK_YEARS,
         "risk_model_horizon": RISK_MODEL_HORIZON,
-        "risk_model": "增强回撤模型",
-        "risk_training_rule": "每个建仓日只使用该日前已完成20日持有期的样本滚动重训",
-        "overheat_definition": "20日回撤风险预测横截面百分位不低于90",
+        "risk_model": "动态申万历史7因子-Ridge",
+        "risk_training_rule": "每个建仓日仅使用该日前已完成20日持有期的动态申万医疗历史成员样本滚动重训",
+        "risk_target_definition": "max(0, -min(未来持有期收益路径))；价格从未跌破建仓价时记为0",
+        "overheat_definition": "20日最大不利波动（MAE）风险预测横截面百分位不低于90",
         "group_rules": {
             "A": "趋势分>=70且过热分<90",
             "B": "趋势分>=40但不满足A",
@@ -411,7 +417,7 @@ def build_backtest(
         "horizons": {
             str(horizon): result[4] for horizon, result in zip(BACKTEST_HORIZONS, results)
         },
-        "universe_note": "使用当前310只股票的历史数据，存在幸存者偏差。",
+        "universe_note": "风险模型训练使用调仓日有效的申万医药生物历史成员，包含退市及被剔除股票；收益矩阵的展示股票仍为当前310只广义医疗股票。",
     }
     return summary, yearly, spreads, detail, two_dimensions, metadata
 

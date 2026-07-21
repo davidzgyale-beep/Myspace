@@ -1,10 +1,11 @@
 {
-  "methodology_version": "simplified_trend_plus_20d_enhanced_drawdown_risk_v1",
+  "methodology_version": "trend_plus_survivorship_free_7factor_mae_risk_v3",
   "lookback_years": 3,
   "risk_model_horizon": 20,
-  "risk_model": "增强回撤模型",
-  "risk_training_rule": "每个建仓日只使用该日前已完成20日持有期的样本滚动重训",
-  "overheat_definition": "20日回撤风险预测横截面百分位不低于90",
+  "risk_model": "动态申万历史7因子-Ridge",
+  "risk_training_rule": "每个建仓日仅使用该日前已完成20日持有期的动态申万医疗历史成员样本滚动重训",
+  "risk_target_definition": "max(0, -min(未来持有期收益路径))；价格从未跌破建仓价时记为0",
+  "overheat_definition": "20日最大不利波动（MAE）风险预测横截面百分位不低于90",
   "group_rules": {
     "A": "趋势分>=70且过热分<90",
     "B": "趋势分>=40但不满足A",
@@ -41,5 +42,5 @@
       "observation_count": 2096
     }
   },
-  "universe_note": "使用当前310只股票的历史数据，存在幸存者偏差。"
+  "universe_note": "风险模型训练使用调仓日有效的申万医药生物历史成员，包含退市及被剔除股票；收益矩阵的展示股票仍为当前310只广义医疗股票。"
 }

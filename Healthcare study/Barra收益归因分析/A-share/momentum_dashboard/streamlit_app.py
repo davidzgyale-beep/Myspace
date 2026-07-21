@@ -27,12 +27,17 @@ def load_snapshot():
     group_backtest_metadata = json.loads(
         (DATA_DIR / "group_backtest_metadata.json").read_text(encoding="utf-8")
     )
-    model_oos = pd.read_csv(DATA_DIR / "model_oos_summary.csv")
-    model_oos_yearly = pd.read_csv(DATA_DIR / "model_oos_yearly.csv")
-    model_scores = pd.read_csv(DATA_DIR / "model_current_scores.csv", parse_dates=["model_training_end"])
-    risk_model_selection = pd.read_csv(DATA_DIR / "risk_model_selection.csv")
-    factor_research_metadata = json.loads(
-        (DATA_DIR / "factor_research_metadata.json").read_text(encoding="utf-8")
+    risk_oos = pd.read_csv(DATA_DIR / "survivorship_free_risk_model_summary.csv")
+    risk_oos_yearly = pd.read_csv(DATA_DIR / "survivorship_free_risk_model_yearly.csv")
+    model_scores = pd.read_csv(DATA_DIR / "model_current_scores.csv")
+    model_scores["model_training_end"] = pd.to_datetime(
+        model_scores["model_training_end"], format="mixed"
+    )
+    production_risk_model = json.loads(
+        (DATA_DIR / "production_risk_model.json").read_text(encoding="utf-8")
+    )
+    risk_model_metadata = json.loads(
+        (DATA_DIR / "survivorship_free_risk_model_metadata.json").read_text(encoding="utf-8")
     )
     metadata = json.loads((DATA_DIR / "metadata.json").read_text(encoding="utf-8"))
     return (
@@ -40,11 +45,11 @@ def load_snapshot():
         history,
         two_dimension_backtest,
         group_backtest_metadata,
-        model_oos,
-        model_oos_yearly,
+        risk_oos,
+        risk_oos_yearly,
         model_scores,
-        risk_model_selection,
-        factor_research_metadata,
+        production_risk_model,
+        risk_model_metadata,
         metadata,
     )
 
@@ -139,11 +144,11 @@ def apply_industry_batch() -> None:
     history,
     two_dimension_backtest,
     group_backtest_meta,
-    model_oos,
-    model_oos_yearly,
+    risk_oos,
+    risk_oos_yearly,
     model_scores,
-    risk_model_selection,
-    factor_research_meta,
+    production_risk_model,
+    risk_model_meta,
     meta,
 ) = load_snapshot()
 rankings = apply_simple_labels(raw_rankings, model_scores)
@@ -208,7 +213,7 @@ with st.sidebar:
     market_cap_range = st.slider("总市值（亿元）", 0, market_cap_max, (0, market_cap_max), 10)
     search = st.text_input("搜索股票", placeholder="输入名称或代码")
     st.caption(
-        f"行情截止 {meta['as_of_date']} · 过热口径 {RISK_HORIZON}日回撤风险模型"
+        f"行情截止 {meta['as_of_date']} · 风险口径 {RISK_HORIZON}日最大不利波动（MAE）"
     )
 
 filtered = rankings[
@@ -227,7 +232,7 @@ if search:
 st.title(":material/query_stats: A股医疗趋势看板")
 st.caption(
     f"覆盖 {meta['stock_count']} 只股票、{meta['subindustry_count']} 个子行业。"
-    "只保留两个判断维度：趋势分表示相对强弱，20日回撤风险分直接用作过热分。"
+    "只保留两个判断维度：趋势分表示相对强弱，风险分表示未来20日最大不利波动的相对排名。"
 )
 
 with st.container(horizontal=True):
@@ -267,7 +272,7 @@ with overview_tab:
     with right.container(border=True):
         scatter = alt.Chart(filtered).mark_circle(opacity=0.8, stroke="white", strokeWidth=0.5).encode(
             x=alt.X("momentum_score:Q", title="趋势分", scale=alt.Scale(domain=[0, 100])),
-            y=alt.Y("overheat_score:Q", title="20日回撤风险分", scale=alt.Scale(domain=[0, 100])),
+            y=alt.Y("overheat_score:Q", title="20日MAE风险分", scale=alt.Scale(domain=[0, 100])),
             size=alt.Size("market_cap_100m:Q", title="总市值（亿元）", scale=alt.Scale(range=[35, 850])),
             color=alt.Color(
                 "risk_bucket:N",
@@ -290,7 +295,7 @@ with overview_tab:
             alt.Chart(pd.DataFrame({"y": [70]})).mark_rule(color="#C8423B", strokeDash=[4, 4]).encode(y="y:Q"),
         )
         st.altair_chart((scatter + rules).properties(height=410).interactive())
-        st.caption("二维分档：趋势40/70为分界，风险30/70为分界；分数越高表示预测回撤风险越高。")
+        st.caption("二维分档：趋势40/70为分界，风险30/70为分界；分数越高表示预测MAE风险越高。")
 
     with st.container(border=True):
         st.markdown("**当前二维分布**")
@@ -409,7 +414,7 @@ with backtest_tab:
             },
         )
     with matrix_right.container(border=True):
-        st.markdown(f"**未来{matrix_horizon}日平均建仓后回撤**")
+        st.markdown(f"**未来{matrix_horizon}日平均最大不利波动**")
         st.dataframe(
             drawdown_matrix,
             column_config={
@@ -444,7 +449,7 @@ with backtest_tab:
     ].iloc[0]
     st.info(
         f"强趋势+低风险的未来{matrix_horizon}日平均收益为"
-        f"{strong_low['average_forward_return']:.2%}，平均建仓后回撤为"
+        f"{strong_low['average_forward_return']:.2%}，平均最大不利波动为"
         f"{strong_low['average_forward_drawdown']:.2%}。但该格平均只有"
         f"{strong_low['average_stock_count']:.1f}只股票，且只在"
         f"{int(strong_low['period_count'])}个调仓期出现，收益均值容易受少数股票影响。"
@@ -455,7 +460,7 @@ with backtest_tab:
             - 二维规则：趋势强≥70、中40–70、弱<40；风险低<30、中30–70、高≥70。
             - 风险模型：{group_backtest_meta['risk_training_rule']}，不使用未来数据形成历史分组。
             - 成交口径：{group_backtest_meta['execution']}；{group_backtest_meta['weighting']}。
-            - 未计交易成本、涨跌停、停牌、冲击成本；{group_backtest_meta['universe_note']}
+            - 未计交易成本、涨跌停和冲击成本；{group_backtest_meta['universe_note']}
             - 5日矩阵有146个非重叠调仓期，20日矩阵有37个非重叠调仓期。某些单元格在部分日期为空，因此同时展示有效期数。
             """
         )
@@ -489,7 +494,7 @@ with stock_tab:
                 f"距60日高点 {pct(row['drawdown_60d'])}"
             )
         with detail_right.container(border=True):
-            st.markdown("**回撤风险拆解**")
+            st.markdown("**MAE风险拆解**")
             st.write(
                 f"{RISK_HORIZON}日回撤模型分：{row['overheat_score']:.1f} · "
                 f"风险档：{row['risk_bucket']} · 模型：{row['risk_model_version']}"
@@ -569,7 +574,7 @@ with compare_tab:
             st.markdown("**趋势与风险位置**")
             background = alt.Chart(rankings).mark_circle(size=35, color="#C8CDD2", opacity=0.35).encode(
                 x=alt.X("momentum_score:Q", title="趋势分", scale=alt.Scale(domain=[0, 100])),
-                y=alt.Y("overheat_score:Q", title="回撤风险分", scale=alt.Scale(domain=[0, 100])),
+                y=alt.Y("overheat_score:Q", title="MAE风险分", scale=alt.Scale(domain=[0, 100])),
             )
             points = alt.Chart(comparison).mark_circle(size=180, stroke="white", strokeWidth=1.5).encode(
                 x="momentum_score:Q",
@@ -667,63 +672,58 @@ with method_tab:
         st.write("趋势分档：强趋势 ≥70 · 中趋势 40–70 · 弱趋势 <40")
 
     with risk_col.container(border=True):
-        st.markdown("**风险分：预测未来20日最大回撤**")
+        st.markdown("**风险分：动态历史股票池7因子模型**")
         st.markdown(
-            "风险分是增强回撤模型预测值在310只股票中的横截面百分位；"
-            "分数越高，未来20日建仓后回撤风险相对越高。"
+            "风险分是7因子Ridge模型预测值在当前310只股票中的横截面百分位；"
+            "分数越高，未来20日MAE风险相对越高。MAE=max(0, -持有期内最低累计收益)；"
+            "若价格从未跌破建仓价，MAE记为0。"
         )
         risk_factor_table = pd.DataFrame(
             {
-                "因子组": ["基础"] * len(factor_research_meta["base_risk_factors"])
-                + ["增强"] * len(factor_research_meta["new_risk_factors"]),
-                "具体因子": factor_research_meta["base_risk_factors"]
-                + factor_research_meta["new_risk_factors"],
+                "因子组": ["波动"] * 3 + ["价格事件"] * 2 + ["市场与资金"] * 2,
+                "具体因子": [
+                    "20日日内振幅/ATR",
+                    "60日波动率",
+                    "60日下行波动率",
+                    "20日最大单日涨幅",
+                    "跳空与极端下跌",
+                    "60日医疗板块Beta",
+                    "拥挤度季度变化",
+                ],
             }
         )
-        st.dataframe(risk_factor_table, hide_index=True, height=430)
+        st.dataframe(risk_factor_table, hide_index=True, height=285)
         st.write("风险分档：低风险 <30 · 中风险 30–70 · 高风险 ≥70 · 极端过热 ≥90")
 
     st.markdown("### 回撤模型验证")
-    selection = risk_model_selection[
-        risk_model_selection["horizon_sessions"] == RISK_HORIZON
-    ].iloc[0]
-    summary = model_oos[model_oos["horizon_sessions"] == RISK_HORIZON].set_index("model")
-    selected_result = summary.loc[selection["selected_model"]]
+    selected_result = risk_oos.iloc[0]
     with st.container(horizontal=True):
-        st.metric("当前模型", selection["selected_model"], border=True)
+        st.metric("当前模型", production_risk_model["model_version"], border=True)
         st.metric("样本外Rank IC", f"{selected_result['mean_rank_ic']:.3f}", border=True)
-        st.metric("高-低风险回撤差", pct(selected_result["top_bottom_spread"]), border=True)
-        st.metric("年度IC为正比例", pct(selected_result["positive_year_rate"]), border=True)
+        st.metric("高-低风险MAE差", pct(selected_result["top_bottom_spread"]), border=True)
+        st.metric("尾部风险召回率", pct(selected_result["top_decile_recall"]), border=True)
 
-    comparison = summary.loc[["基础回撤模型", "增强回撤模型"]].reset_index()
     validation_left, validation_right = st.columns(2, gap="medium")
     with validation_left.container(border=True):
-        st.markdown("**基础与增强模型**")
+        st.markdown("**无幸存者偏差样本外结果**")
         st.dataframe(
-            comparison[["model", "mean_rank_ic", "top_bottom_spread", "positive_year_rate", "rebalance_count"]],
+            risk_oos[["model", "mean_rank_ic", "top_bottom_spread", "top_decile_recall", "rebalance_count"]],
             hide_index=True,
             column_config={
                 "model": "模型",
                 "mean_rank_ic": st.column_config.NumberColumn("样本外Rank IC", format="%.3f"),
-                "top_bottom_spread": st.column_config.NumberColumn("高-低风险回撤差", format="percent"),
-                "positive_year_rate": st.column_config.NumberColumn("年度IC为正比例", format="percent"),
+                "top_bottom_spread": st.column_config.NumberColumn("高-低风险MAE差", format="percent"),
+                "top_decile_recall": st.column_config.NumberColumn("尾部召回率", format="percent"),
                 "rebalance_count": "独立调仓期",
             },
         )
-    yearly = model_oos_yearly[
-        (model_oos_yearly["horizon_sessions"] == RISK_HORIZON)
-        & (model_oos_yearly["model"].isin(["基础回撤模型", "增强回撤模型"]))
-    ].copy()
     with validation_right.container(border=True):
         st.markdown("**逐年样本外Rank IC**")
-        yearly_chart = alt.Chart(yearly).mark_bar().encode(
+        yearly_chart = alt.Chart(risk_oos_yearly).mark_bar(color="#C8423B").encode(
             x=alt.X("test_year:O", title="测试年份"),
             y=alt.Y("mean_rank_ic:Q", title="平均Rank IC"),
-            xOffset="model:N",
-            color=alt.Color("model:N", title="模型", scale=alt.Scale(range=["#587A95", "#C8423B"])),
             tooltip=[
                 alt.Tooltip("test_year:O", title="年份"),
-                alt.Tooltip("model:N", title="模型"),
                 alt.Tooltip("mean_rank_ic:Q", title="Rank IC", format=".3f"),
             ],
         ).properties(height=300)
@@ -732,11 +732,14 @@ with method_tab:
     with st.expander("训练、中性化与数据边界"):
         st.markdown(
             f"""
-            - 风险因子中性化：{factor_research_meta['risk_neutralization']}。
-            - 升级标准：{factor_research_meta['risk_model_promotion_rule']}。
-            - 历史回测每个建仓日只使用当时已完成持有期的样本重训，不使用未来数据。
+            - 历史股票池：{risk_model_meta['universe_definition']}。
+            - 成分规则：{risk_model_meta['membership_rule']}。
+            - 因子中性化：调仓日有效的申万二级行业哑变量 + 对数总市值。
+            - 退市处理：{risk_model_meta['delisting_treatment']}。
+            - 历史回测每个建仓日只使用当时已完成20日持有期的样本重训，不使用未来目标。
             - 当前模型训练截止：{rankings['model_training_end'].max().date()}。
-            - {factor_research_meta['universe_note']}
+            - 当前展示仍为310只广义医疗股票，其中{production_risk_model['theme_only_extrapolation_count']}只仅来自医疗主题指数，属于模型外推。
+            - 2019–2026年已参与研发；真正前瞻样本从2026-07-20之后的预测开始累计。
             """
         )
     st.info(

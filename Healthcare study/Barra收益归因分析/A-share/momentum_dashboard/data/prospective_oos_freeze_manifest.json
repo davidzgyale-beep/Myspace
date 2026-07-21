@@ -1,0 +1,26 @@
+{
+  "frozen_at": "2026-07-21T00:00:00+08:00",
+  "last_research_data_date": "2026-07-20",
+  "first_eligible_unseen_entry_date": "first A-share trading day after 2026-07-20",
+  "target_maturity_rule": "score only after 20 subsequent A-share trading sessions",
+  "model": "7-factor Ridge, ridge_alpha=5.0",
+  "factors": [
+    "20日日内振幅/ATR",
+    "60日波动率",
+    "60日下行波动率",
+    "20日最大单日涨幅",
+    "跳空与极端下跌",
+    "60日医疗板块Beta",
+    "拥挤度季度变化"
+  ],
+  "universe": "entry-date-valid SW healthcare L1 membership using in_date/out_date",
+  "target": "max(0, -min(next 20 session return path relative to entry))",
+  "evaluation": [
+    "mean cross-sectional Spearman Rank IC",
+    "top-bottom MAE spread",
+    "top-decile recall"
+  ],
+  "no_research_reuse_rule": "No factor, parameter, target, universe, or preprocessing changes may be selected using frozen-period outcomes.",
+  "script_sha256": "bf4940edca15f3553367d432513afdd6759e3a3b2dca5b0e4b1afd46320a26d9",
+  "status": "awaiting_first_mature_observation"
+}

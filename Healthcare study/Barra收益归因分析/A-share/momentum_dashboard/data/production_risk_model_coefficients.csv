@@ -1,0 +1,8 @@
+﻿factor,factor_label,coefficient
+risk_intraday_atr_20d,20日日内振幅/ATR,0.01403856278214276
+risk_volatility_60d,60日波动率,0.008566392576647942
+risk_downside_volatility_60d,60日下行波动率,-0.004032100253914716
+risk_max_return_20d,20日最大单日涨幅,0.0006572037976702578
+risk_gap_extreme_down_60d,跳空与极端下跌,0.001299609406183991
+risk_healthcare_beta_60d,60日医疗板块Beta,-0.0017256487072439845
+risk_crowding_quarter_change,拥挤度季度变化,-0.0019654340324806513

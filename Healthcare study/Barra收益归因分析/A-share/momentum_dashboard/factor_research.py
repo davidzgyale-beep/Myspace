@@ -50,6 +50,15 @@ SECOND_WAVE_RISK_FACTORS = [
     "risk_intraday_atr_20d",
 ]
 RISK_FACTORS = BASE_RISK_FACTORS + NEW_RISK_FACTORS + SECOND_WAVE_RISK_FACTORS
+PRODUCTION_RISK_FACTORS = [
+    "risk_intraday_atr_20d",
+    "risk_volatility_60d",
+    "risk_downside_volatility_60d",
+    "risk_max_return_20d",
+    "risk_gap_extreme_down_60d",
+    "risk_healthcare_beta_60d",
+    "risk_crowding_quarter_change",
+]
 FACTOR_LABELS = {
     "trend_5d": "5日趋势",
     "trend_20d": "20日趋势",
@@ -127,6 +136,24 @@ def neutralize_risk(frame: pd.DataFrame, factor: str) -> pd.Series:
         )
         residual.loc[valid] = y.loc[valid] - controls.loc[valid].to_numpy(float) @ coefficients
     return robust_zscore(residual)
+
+
+def apply_production_risk_neutralization(
+    current: pd.DataFrame, production_model: dict
+) -> pd.DataFrame:
+    """Apply the production model's SW L2 and size neutralization to a live snapshot."""
+    result = current.copy()
+    subindustry_map = production_model.get("scoring_subindustry_by_code", {})
+    result["healthcare_subindustry"] = (
+        result.index.to_series().map(subindustry_map).fillna("非申万医疗主题")
+    )
+    for factor in production_model["coefficients"]:
+        raw_column = f"raw_{factor}"
+        if raw_column not in result:
+            raise KeyError(f"Production factor is missing raw exposure: {raw_column}")
+        result[factor] = result[raw_column]
+        result[factor] = neutralize_risk(result, factor)
+    return result
 
 
 def load_panels(
@@ -303,7 +330,7 @@ def build_horizon_panel(
         features["entry_date"] = prices.index[position]
         features["exit_date"] = prices.index[position + horizon]
         features["forward_return"] = prices.iloc[position + horizon] / entry - 1
-        features["forward_drawdown_loss"] = -path.min()
+        features["forward_drawdown_loss"] = maximum_adverse_excursion(path)
         rows.append(features.reset_index())
     return pd.concat(rows, ignore_index=True)
 
@@ -383,6 +410,11 @@ def score_percentile(series: pd.Series) -> pd.Series:
     return series.rank(method="average", pct=True) * 100
 
 
+def maximum_adverse_excursion(return_path: pd.DataFrame) -> pd.Series:
+    """Return entry-relative loss, floored at zero when price never breaches entry."""
+    return (-return_path.min()).clip(lower=0)
+
+
 def model_metrics(
     test: pd.DataFrame,
     prediction_column: str,
@@ -402,7 +434,7 @@ def model_metrics(
         "horizon_sessions": horizon,
         "test_year": year,
         "model": model,
-        "target": "未来收益" if target == "forward_return" else "未来最大回撤风险",
+        "target": "未来收益" if target == "forward_return" else "未来最大不利波动（MAE）",
         "mean_rank_ic": period_ics.mean(),
         "rank_ic_ir": period_ics.mean() / period_ics.std() if period_ics.std() > 0 else np.nan,
         "positive_ic_rate": (period_ics > 0).mean(),
@@ -458,24 +490,50 @@ def current_scores(
         len(prices) - 1, prices, daily_returns, market_returns, basic_panels, universe_by_code
     )
     rows = []
+    production_model_path = DATA_DIR / "production_risk_model.json"
+    production_model = (
+        json.loads(production_model_path.read_text(encoding="utf-8"))
+        if production_model_path.exists()
+        else None
+    )
     for horizon, panel in panels_by_horizon.items():
         available = panel[panel["exit_date"] <= prices.index[-1]].copy()
         return_intercept, return_coef = fit_ridge(available, ALPHA_FACTORS, "forward_return")
-        selected_model = model_selection.loc[
-            model_selection["horizon_sessions"] == horizon, "selected_model"
-        ].iloc[0]
-        selected_factors = RISK_FACTORS if selected_model == "增强回撤模型" else BASE_RISK_FACTORS
-        risk_intercept, risk_coef = fit_ridge(available, selected_factors, "forward_drawdown_loss")
+        if production_model and horizon == production_model["horizon_sessions"]:
+            selected_model = production_model["model_version"]
+            selected_factors = list(production_model["coefficients"])
+            production_current = apply_production_risk_neutralization(
+                current, production_model
+            )
+            risk_intercept = production_model["intercept"]
+            risk_coef = np.asarray(
+                [production_model["coefficients"][factor] for factor in selected_factors]
+            )
+            model_training_end = pd.Timestamp(production_model["training_end"])
+        else:
+            selected_model = model_selection.loc[
+                model_selection["horizon_sessions"] == horizon, "selected_model"
+            ].iloc[0]
+            selected_factors = RISK_FACTORS if selected_model == "增强回撤模型" else BASE_RISK_FACTORS
+            risk_intercept, risk_coef = fit_ridge(
+                available, selected_factors, "forward_drawdown_loss"
+            )
+            model_training_end = available["exit_date"].max()
         result = current[["name", "healthcare_subindustry"]].copy()
         result["horizon_sessions"] = horizon
         result["expected_return_score"] = score_percentile(
             predict(current, ALPHA_FACTORS, return_intercept, return_coef)
         )
         result["drawdown_risk_score"] = score_percentile(
-            predict(current, selected_factors, risk_intercept, risk_coef)
+            predict(
+                production_current if production_model and horizon == production_model["horizon_sessions"] else current,
+                selected_factors,
+                risk_intercept,
+                risk_coef,
+            )
         )
         result["risk_model_version"] = selected_model
-        result["model_training_end"] = available["exit_date"].max()
+        result["model_training_end"] = model_training_end
         result.index.name = "ts_code"
         rows.append(result.reset_index())
     return pd.concat(rows, ignore_index=True)
@@ -594,6 +652,7 @@ def run_research(source_dir: Path) -> None:
         "healthcare_beta_benchmark": "当前医疗股票池等权日收益",
         "risk_model_promotion_rule": "平均样本外Rank IC提高、十分位回撤差扩大、至少半数测试年度IC改善、且不少于20个独立调仓期",
         "risk_model_min_promotion_rebalances": MIN_PROMOTION_REBALANCES,
+        "risk_target_definition": "max(0, -min(未来持有期收益路径))；价格从未跌破建仓价时记为0",
         "universe_note": "使用当前310只股票的历史数据，存在幸存者偏差。",
     }
     DATA_DIR.mkdir(parents=True, exist_ok=True)
