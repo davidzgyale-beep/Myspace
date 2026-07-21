@@ -1,0 +1,35 @@
+﻿horizon_sessions,healthcare_benchmark,factor,factor_label,standardized_coefficient
+5,中证申万医药生物指数,market_beta_60d,60日大盘Beta,0.0010313241958901241
+5,中证申万医药生物指数,healthcare_beta_60d,60日医药Beta,0.0009214680842063275
+5,中证申万医药生物指数,market_return_20d,沪深300 20日收益,-7.186355393217722e-19
+5,中证申万医药生物指数,healthcare_return_20d,医药指数20日收益,4.675820730317139e-19
+5,中证申万医药生物指数,healthcare_relative_20d,医药相对大盘20日强弱,9.767456151212827e-20
+5,中证申万医药生物指数,market_ma60_gap,沪深300距MA60,1.2028341141454965e-18
+5,中证申万医药生物指数,healthcare_ma60_gap,医药指数距MA60,-1.0349658064434514e-18
+5,中证申万医药生物指数,market_beta_x_market_return,大盘Beta×沪深300趋势,0.0012137456049300965
+5,中证申万医药生物指数,healthcare_beta_x_healthcare_return,医药Beta×医药趋势,0.0011167182909916959
+5,中证申万医药生物指数,healthcare_beta_x_relative_strength,医药Beta×医药相对强弱,0.0002486603430839662
+5,中证申万医药生物指数,market_beta_x_market_ma60,大盘Beta×大盘MA60位置,-0.0016629296801154469
+5,中证申万医药生物指数,healthcare_beta_x_healthcare_ma60,医药Beta×医药MA60位置,-0.00236215300375803
+5,中证申万医药生物指数,market_beta_change_60d,大盘Beta近期变化,0.00018591464296996652
+5,中证申万医药生物指数,healthcare_beta_change_60d,医药Beta近期变化,-0.0004927305004315298
+5,中证申万医药生物指数,residual_momentum_20d,20日残差动量,-0.000675031242477616
+5,中证申万医药生物指数,residual_volatility_60d,60日残差波动率,-0.001494893135710955
+5,中证申万医药生物指数,two_factor_r_squared_60d,双因子拟合度R²,-0.0007810087087407207
+20,中证申万医药生物指数,market_beta_60d,60日大盘Beta,0.005721811099809492
+20,中证申万医药生物指数,healthcare_beta_60d,60日医药Beta,0.003982539436682448
+20,中证申万医药生物指数,market_return_20d,沪深300 20日收益,-6.815418054807965e-17
+20,中证申万医药生物指数,healthcare_return_20d,医药指数20日收益,7.586160828825503e-17
+20,中证申万医药生物指数,healthcare_relative_20d,医药相对大盘20日强弱,-5.221752792390851e-17
+20,中证申万医药生物指数,market_ma60_gap,沪深300距MA60,1.0327974620416568e-17
+20,中证申万医药生物指数,healthcare_ma60_gap,医药指数距MA60,-6.3830796951505396e-18
+20,中证申万医药生物指数,market_beta_x_market_return,大盘Beta×沪深300趋势,0.0010366131284241119
+20,中证申万医药生物指数,healthcare_beta_x_healthcare_return,医药Beta×医药趋势,0.0002552860347110225
+20,中证申万医药生物指数,healthcare_beta_x_relative_strength,医药Beta×医药相对强弱,-0.0006364019128107852
+20,中证申万医药生物指数,market_beta_x_market_ma60,大盘Beta×大盘MA60位置,-0.004345387819955604
+20,中证申万医药生物指数,healthcare_beta_x_healthcare_ma60,医药Beta×医药MA60位置,-0.004710708344261415
+20,中证申万医药生物指数,market_beta_change_60d,大盘Beta近期变化,-0.0021925652032584015
+20,中证申万医药生物指数,healthcare_beta_change_60d,医药Beta近期变化,-0.00373676930233093
+20,中证申万医药生物指数,residual_momentum_20d,20日残差动量,-0.002989272943412722
+20,中证申万医药生物指数,residual_volatility_60d,60日残差波动率,-0.005707146302307955
+20,中证申万医药生物指数,two_factor_r_squared_60d,双因子拟合度R²,-0.004311271634483211

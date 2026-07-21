@@ -43,6 +43,16 @@ def load_snapshot():
     risk_model_metadata = json.loads(
         (DATA_DIR / "survivorship_free_risk_model_metadata.json").read_text(encoding="utf-8")
     )
+    return_model_summary = pd.read_csv(DATA_DIR / "return_model_summary.csv")
+    return_model_yearly = pd.read_csv(DATA_DIR / "return_model_yearly.csv")
+    return_model_regime = pd.read_csv(DATA_DIR / "return_model_regime.csv")
+    return_model_paired = pd.read_csv(DATA_DIR / "return_model_paired_comparison.csv")
+    return_model_scores = pd.read_csv(
+        DATA_DIR / "return_model_current_scores.csv", parse_dates=["entry_date"]
+    )
+    return_model_metadata = json.loads(
+        (DATA_DIR / "return_model_metadata.json").read_text(encoding="utf-8")
+    )
     metadata = json.loads((DATA_DIR / "metadata.json").read_text(encoding="utf-8"))
     return (
         rankings,
@@ -56,6 +66,12 @@ def load_snapshot():
         model_scores,
         production_risk_model,
         risk_model_metadata,
+        return_model_summary,
+        return_model_yearly,
+        return_model_regime,
+        return_model_paired,
+        return_model_scores,
+        return_model_metadata,
         metadata,
     )
 
@@ -172,9 +188,19 @@ def apply_industry_batch() -> None:
     model_scores,
     production_risk_model,
     risk_model_meta,
+    return_model_summary,
+    return_model_yearly,
+    return_model_regime,
+    return_model_paired,
+    return_model_scores,
+    return_model_meta,
     meta,
 ) = load_snapshot()
 rankings = apply_simple_labels(raw_rankings, model_scores)
+current_return_scores = return_model_scores.pivot(
+    index="ts_code", columns="horizon_sessions", values="return_model_score"
+).rename(columns={5: "return_score_5d", 20: "return_score_20d"})
+rankings = rankings.merge(current_return_scores, on="ts_code", how="left", validate="one_to_one")
 current_market_state = market_state_history.iloc[-1]
 
 ALL_INDUSTRIES = sorted(rankings["healthcare_subindustry"].dropna().unique().tolist())
@@ -449,6 +475,7 @@ with overview_tab:
             [
                 "market_rank", "name", "ts_code", "healthcare_subindustry",
                 "trend_bucket", "risk_bucket", "momentum_score", "overheat_score",
+                "return_score_5d", "return_score_20d",
                 "market_beta_60d", "market_beta_bucket",
                 "healthcare_beta_60d", "healthcare_beta_bucket",
                 "ret_5d", "ret_20d", "ret_60d", "ret_120d", "market_cap_100m",
@@ -467,6 +494,8 @@ with overview_tab:
                 "risk_bucket": "风险档",
                 "momentum_score": st.column_config.ProgressColumn("趋势分", min_value=0, max_value=100, format="%.1f"),
                 "overheat_score": st.column_config.ProgressColumn("风险分", min_value=0, max_value=100, format="%.1f"),
+                "return_score_5d": st.column_config.ProgressColumn("实验收益分5日", min_value=0, max_value=100, format="%.1f"),
+                "return_score_20d": st.column_config.ProgressColumn("实验收益分20日", min_value=0, max_value=100, format="%.1f"),
                 "market_beta_60d": st.column_config.NumberColumn("大盘Beta", format="%.2f"),
                 "market_beta_bucket": "大盘Beta档",
                 "healthcare_beta_60d": st.column_config.NumberColumn("医疗Beta", format="%.2f"),
@@ -487,6 +516,115 @@ with overview_tab:
         )
 
 with backtest_tab:
+    st.subheader("实验收益模型", anchor=False)
+    return_horizon_label = st.segmented_control(
+        "收益模型周期",
+        ["5日", "20日"],
+        default="5日",
+        required=True,
+        key="return_model_horizon",
+    )
+    return_horizon = int(return_horizon_label.removesuffix("日"))
+    primary_return_results = return_model_summary[
+        (return_model_summary["healthcare_benchmark"] == "中证申万医药生物指数")
+        & (return_model_summary["horizon_sessions"] == return_horizon)
+    ].copy()
+    model_four = primary_return_results[
+        primary_return_results["model"] == "4. 交互项+残差动量+Beta变化"
+    ].iloc[0]
+    baseline = primary_return_results[
+        primary_return_results["model"] == "1. 趋势基线"
+    ].iloc[0]
+    with st.container(horizontal=True):
+        st.metric("完整模型 Rank IC", f"{model_four['mean_rank_ic']:.3f}", border=True)
+        st.metric("趋势基线 Rank IC", f"{baseline['mean_rank_ic']:.3f}", border=True)
+        st.metric("完整模型 Top-Bottom", pct(model_four["top_bottom_spread"]), border=True)
+        st.metric("正IC比例", pct(model_four["positive_ic_rate"]), border=True)
+        st.metric("独立调仓期", f"{int(model_four['rebalance_count'])}", border=True)
+    st.warning(
+        "该模型目前仅作实验性收益排名：它不改变趋势分、MAE风险分或ABC分组。"
+        "因结果已用于选模，这是研发期扩展窗口样本外，不是最终盲测。",
+        icon=":material/science:",
+    )
+    model_table = primary_return_results[
+        [
+            "model", "mean_rank_ic", "positive_ic_rate", "top_decile_relative_return",
+            "bottom_decile_relative_return", "top_bottom_spread", "spread_win_rate",
+            "rebalance_count",
+        ]
+    ]
+    with st.container(border=True):
+        st.markdown("**四组模型对照（动态无幸存者偏差股票池）**")
+        st.dataframe(
+            model_table,
+            hide_index=True,
+            column_config={
+                "model": "模型",
+                "mean_rank_ic": st.column_config.NumberColumn("样本外Rank IC", format="%.3f"),
+                "positive_ic_rate": st.column_config.NumberColumn("正IC比例", format="percent"),
+                "top_decile_relative_return": st.column_config.NumberColumn("Top组相对收益", format="percent"),
+                "bottom_decile_relative_return": st.column_config.NumberColumn("Bottom组相对收益", format="percent"),
+                "top_bottom_spread": st.column_config.NumberColumn("Top-Bottom", format="percent"),
+                "spread_win_rate": st.column_config.NumberColumn("价差胜率", format="percent"),
+                "rebalance_count": "独立调仓期",
+            },
+        )
+    return_left, return_right = st.columns(2, gap="medium")
+    with return_left.container(border=True):
+        st.markdown("**完整模型逐年 Rank IC**")
+        return_yearly_view = return_model_yearly[
+            (return_model_yearly["healthcare_benchmark"] == "中证申万医药生物指数")
+            & (return_model_yearly["horizon_sessions"] == return_horizon)
+            & (return_model_yearly["model"] == "4. 交互项+残差动量+Beta变化")
+        ]
+        st.bar_chart(return_yearly_view, x="test_year", y="mean_rank_ic")
+    with return_right.container(border=True):
+        st.markdown("**完整模型分市场状态**")
+        return_regime_view = return_model_regime[
+            (return_model_regime["healthcare_benchmark"] == "中证申万医药生物指数")
+            & (return_model_regime["horizon_sessions"] == return_horizon)
+            & (return_model_regime["model"] == "4. 交互项+残差动量+Beta变化")
+        ]
+        st.dataframe(
+            return_regime_view[
+                ["market_regime", "mean_rank_ic", "top_bottom_spread", "rebalance_count"]
+            ],
+            hide_index=True,
+            column_config={
+                "market_regime": "市场状态",
+                "mean_rank_ic": st.column_config.NumberColumn("Rank IC", format="%.3f"),
+                "top_bottom_spread": st.column_config.NumberColumn("Top-Bottom", format="percent"),
+                "rebalance_count": "调仓期",
+            },
+        )
+    with st.expander("基准、配对检验与局限"):
+        paired_view = return_model_paired[
+            return_model_paired["horizon_sessions"] == return_horizon
+        ][
+            [
+                "candidate_model", "mean_delta_rank_ic", "delta_rank_ic_ci_low",
+                "delta_rank_ic_ci_high", "mean_delta_top_bottom_spread",
+                "delta_spread_ci_low", "delta_spread_ci_high",
+            ]
+        ]
+        st.dataframe(
+            paired_view,
+            hide_index=True,
+            column_config={
+                "candidate_model": "相对趋势基线的候选模型",
+                "mean_delta_rank_ic": st.column_config.NumberColumn("ΔRank IC", format="%.3f"),
+                "delta_rank_ic_ci_low": st.column_config.NumberColumn("IC差95%CI下限", format="%.3f"),
+                "delta_rank_ic_ci_high": st.column_config.NumberColumn("IC差95%CI上限", format="%.3f"),
+                "mean_delta_top_bottom_spread": st.column_config.NumberColumn("ΔTop-Bottom", format="percent"),
+                "delta_spread_ci_low": st.column_config.NumberColumn("价差95%CI下限", format="percent"),
+                "delta_spread_ci_high": st.column_config.NumberColumn("价差95%CI上限", format="percent"),
+            },
+        )
+        st.caption(
+            f"主基准：{return_model_meta['primary_healthcare_benchmark']}。"
+            f"{return_model_meta['benchmark_note']}"
+        )
+
     st.subheader("趋势 × 风险二维回测", anchor=False)
     matrix_horizon_label = st.segmented_control(
         "二维矩阵周期",
@@ -665,6 +803,16 @@ with stock_tab:
             st.metric("趋势分", f"{row['momentum_score']:.1f}", border=True)
             st.metric("风险分", f"{row['overheat_score']:.1f}", border=True)
             st.metric(
+                "实验收益分5日",
+                f"{row['return_score_5d']:.1f}",
+                border=True,
+            )
+            st.metric(
+                "实验收益分20日",
+                f"{row['return_score_20d']:.1f}",
+                border=True,
+            )
+            st.metric(
                 "大盘Beta",
                 f"{row['market_beta_60d']:.2f}",
                 row["market_beta_bucket"],
@@ -747,6 +895,7 @@ with compare_tab:
             [
                 "market_rank", "name", "ts_code", "healthcare_subindustry", "trend_bucket", "risk_bucket",
                 "momentum_score", "overheat_score",
+                "return_score_5d", "return_score_20d",
                 "market_beta_60d", "market_beta_bucket",
                 "healthcare_beta_60d", "healthcare_beta_bucket",
                 "ret_5d", "ret_20d", "ret_60d",
@@ -767,6 +916,8 @@ with compare_tab:
                     "risk_bucket": "风险档",
                     "momentum_score": st.column_config.ProgressColumn("趋势分", min_value=0, max_value=100, format="%.1f"),
                     "overheat_score": st.column_config.ProgressColumn("风险分", min_value=0, max_value=100, format="%.1f"),
+                    "return_score_5d": st.column_config.ProgressColumn("实验收益分5日", min_value=0, max_value=100, format="%.1f"),
+                    "return_score_20d": st.column_config.ProgressColumn("实验收益分20日", min_value=0, max_value=100, format="%.1f"),
                     "market_beta_60d": st.column_config.NumberColumn("大盘Beta", format="%.2f"),
                     "market_beta_bucket": "大盘Beta档",
                     "healthcare_beta_60d": st.column_config.NumberColumn("医疗Beta", format="%.2f"),
@@ -945,6 +1096,21 @@ with method_tab:
         )
         st.dataframe(state_rules, hide_index=True)
 
+    with st.container(border=True):
+        st.markdown("**实验性收益模型（不参与ABC分组）**")
+        st.markdown(
+            """
+            - 目标是预测个股相对中证申万医药生物指数的5日/20日收益排名。
+            - 输入包含沪深300与医药指数状态、个股双Beta、状态×Beta交互项、Beta变化、残差动量、残差波动率与R²。
+            - 每个测试年仅使用以前已完成持有期的动态申万历史成员样本训练Ridge。
+            - 当前分数是310股横截面百分位；这是相对研究优先级，不是绝对收益率预测。
+            """
+        )
+        st.caption(
+            "收益模型已参与本次选模，因此2023年后结果不再视为最终未参与研发的盲测。"
+            "新增分数不改变趋势分、MAE风险分或ABC分组。"
+        )
+
     st.markdown("### 回撤模型验证")
     selected_result = risk_oos.iloc[0]
     with st.container(horizontal=True):
@@ -993,8 +1159,8 @@ with method_tab:
             """
         )
     st.info(
-        "三层信息独立使用：趋势分排研究优先级，风险分评估MAE，"
-        "市场状态与Beta决定当前更应偏重趋势还是风险；它们不合并解释为买入概率。"
+        "四类信息独立使用：趋势分描述价格强弱，收益模型排相对收益优先级，"
+        "风险分评估MAE，市场状态与Beta提供情景解释；它们不合并解释为买入概率。"
     )
     st.warning(
         f"价格截至 {meta['as_of_date']}。看板用于研究和监控，不构成投资建议。",

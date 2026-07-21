@@ -1,0 +1,91 @@
+{
+  "research_status": "研发期扩展窗口样本外；因结果将用于选模，不属于最终盲测",
+  "universe": "调仓日有效的申万医药生物历史成员，包含退市及被剔除股票",
+  "target": "个股未来收益-同期医药基准收益",
+  "primary_healthcare_benchmark": "000808.CSI 中证申万医药生物指数",
+  "benchmark_note": "801150.SI申万行业指数日行情无Tushare权限；主基准改用可直接取得的中证申万医药生物指数，ETF仅作稳健性对照",
+  "market_benchmark": "000300.SH 沪深300",
+  "etf_robustness_benchmark": "159938.SZ 广发中证全指医药卫生ETF",
+  "oos_start_year": 2023,
+  "horizons": [
+    5,
+    20
+  ],
+  "ridge_alpha": 100.0,
+  "models": {
+    "1. 趋势基线": [
+      "stock_return_5d",
+      "stock_return_20d",
+      "stock_return_60_ex_20d",
+      "stock_ma20_gap",
+      "stock_ma60_gap"
+    ],
+    "2. 指数状态+双Beta": [
+      "market_beta_60d",
+      "healthcare_beta_60d",
+      "market_return_20d",
+      "healthcare_return_20d",
+      "healthcare_relative_20d",
+      "market_ma60_gap",
+      "healthcare_ma60_gap"
+    ],
+    "3. 状态+双Beta+交互项": [
+      "market_beta_60d",
+      "healthcare_beta_60d",
+      "market_return_20d",
+      "healthcare_return_20d",
+      "healthcare_relative_20d",
+      "market_ma60_gap",
+      "healthcare_ma60_gap",
+      "market_beta_x_market_return",
+      "healthcare_beta_x_healthcare_return",
+      "healthcare_beta_x_relative_strength",
+      "market_beta_x_market_ma60",
+      "healthcare_beta_x_healthcare_ma60"
+    ],
+    "4. 交互项+残差动量+Beta变化": [
+      "market_beta_60d",
+      "healthcare_beta_60d",
+      "market_return_20d",
+      "healthcare_return_20d",
+      "healthcare_relative_20d",
+      "market_ma60_gap",
+      "healthcare_ma60_gap",
+      "market_beta_x_market_return",
+      "healthcare_beta_x_healthcare_return",
+      "healthcare_beta_x_relative_strength",
+      "market_beta_x_market_ma60",
+      "healthcare_beta_x_healthcare_ma60",
+      "market_beta_change_60d",
+      "healthcare_beta_change_60d",
+      "residual_momentum_20d",
+      "residual_volatility_60d",
+      "two_factor_r_squared_60d"
+    ]
+  },
+  "factor_labels": {
+    "stock_return_5d": "个股5日收益",
+    "stock_return_20d": "个股20日收益",
+    "stock_return_60_ex_20d": "个股60日剔除近20日收益",
+    "stock_ma20_gap": "个股距MA20",
+    "stock_ma60_gap": "个股距MA60",
+    "market_beta_60d": "60日大盘Beta",
+    "healthcare_beta_60d": "60日医药Beta",
+    "market_return_20d": "沪深300 20日收益",
+    "healthcare_return_20d": "医药指数20日收益",
+    "healthcare_relative_20d": "医药相对大盘20日强弱",
+    "market_ma60_gap": "沪深300距MA60",
+    "healthcare_ma60_gap": "医药指数距MA60",
+    "market_beta_x_market_return": "大盘Beta×沪深300趋势",
+    "healthcare_beta_x_healthcare_return": "医药Beta×医药趋势",
+    "healthcare_beta_x_relative_strength": "医药Beta×医药相对强弱",
+    "market_beta_x_market_ma60": "大盘Beta×大盘MA60位置",
+    "healthcare_beta_x_healthcare_ma60": "医药Beta×医药MA60位置",
+    "market_beta_change_60d": "大盘Beta近期变化",
+    "healthcare_beta_change_60d": "医药Beta近期变化",
+    "residual_momentum_20d": "20日残差动量",
+    "residual_volatility_60d": "60日残差波动率",
+    "two_factor_r_squared_60d": "双因子拟合度R²"
+  },
+  "data_end": "20260720"
+}
