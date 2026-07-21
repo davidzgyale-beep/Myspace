@@ -19,7 +19,7 @@ st.set_page_config(page_title="A股医疗研究看板", page_icon=":material/que
 
 
 @st.cache_data(show_spinner="正在载入研究快照…")
-def load_snapshot() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, dict, dict]:
+def load_snapshot():
     rankings = pd.read_csv(DATA_DIR / "momentum_snapshot.csv", parse_dates=["price_date", "valuation_as_of_date"])
     history = pd.read_csv(DATA_DIR / "price_history.csv.gz", parse_dates=["trade_date"])
     industries = pd.read_csv(DATA_DIR / "subindustry_snapshot.csv")
@@ -28,8 +28,20 @@ def load_snapshot() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFr
     group_backtest_metadata = json.loads(
         (DATA_DIR / "group_backtest_metadata.json").read_text(encoding="utf-8")
     )
+    factor_research = pd.read_csv(DATA_DIR / "factor_research_summary.csv")
+    factor_deciles = pd.read_csv(DATA_DIR / "factor_decile_returns.csv")
+    model_oos = pd.read_csv(DATA_DIR / "model_oos_summary.csv")
+    model_oos_yearly = pd.read_csv(DATA_DIR / "model_oos_yearly.csv")
+    model_scores = pd.read_csv(DATA_DIR / "model_current_scores.csv", parse_dates=["model_training_end"])
+    factor_research_metadata = json.loads(
+        (DATA_DIR / "factor_research_metadata.json").read_text(encoding="utf-8")
+    )
     metadata = json.loads((DATA_DIR / "metadata.json").read_text(encoding="utf-8"))
-    return rankings, history, industries, group_backtest, group_backtest_yearly, group_backtest_metadata, metadata
+    return (
+        rankings, history, industries, group_backtest, group_backtest_yearly, group_backtest_metadata,
+        factor_research, factor_deciles, model_oos, model_oos_yearly, model_scores,
+        factor_research_metadata, metadata,
+    )
 
 
 def pct(value: float) -> str:
@@ -62,7 +74,11 @@ def apply_industry_batch() -> None:
     st.session_state["selected_industries"] = sorted((current | additions) - removals)
 
 
-rankings, history, industries, group_backtest, group_backtest_yearly, group_backtest_meta, meta = load_snapshot()
+(
+    rankings, history, industries, group_backtest, group_backtest_yearly, group_backtest_meta,
+    factor_research, factor_deciles, model_oos, model_oos_yearly, model_scores,
+    factor_research_meta, meta,
+) = load_snapshot()
 ALL_INDUSTRIES = sorted(rankings["healthcare_subindustry"].dropna().unique().tolist())
 top_industries = industries.sort_values("median_momentum", ascending=False)["healthcare_subindustry"].head(7).tolist()
 INDUSTRY_PRESETS = {
@@ -128,8 +144,8 @@ with st.container(horizontal=True):
     st.metric("20日收益中位数", pct(filtered["ret_20d"].median()), border=True)
     st.metric("高追高风险", f"{(filtered['overheat_score'] >= 90).sum()} 只", border=True)
 
-overview_tab, backtest_tab, ranking_tab, stock_tab, compare_tab, method_tab = st.tabs(
-    ["市场状态", "分组回测", "股票排名", "个股拆解", "个股比较", "评分方法"]
+overview_tab, backtest_tab, factor_tab, model_tab, ranking_tab, stock_tab, compare_tab, method_tab = st.tabs(
+    ["市场状态", "分组回测", "因子检验", "样本外模型", "股票排名", "个股拆解", "个股比较", "评分方法"]
 )
 
 with overview_tab:
@@ -287,6 +303,131 @@ with backtest_tab:
             - 5/20/120日都使用与持有期相同的调仓间隔，形成非重叠组合；每个调仓日组内股票等权。
             - 未计交易成本、停牌成交限制、涨跌停和冲击成本；当前310只股票池用于全部历史时期，存在幸存者偏差。
             - A组在部分历史调仓日为空，因此有效期数少于B/C组；120日周期独立样本尤其有限。结果是历史描述，不构成未来收益承诺。
+            """
+        )
+
+with factor_tab:
+    st.subheader("单因子有效性与十分位收益", anchor=False)
+    factor_horizon_label = st.segmented_control(
+        "检验周期", ["5日", "20日", "60日", "120日"], default="20日", required=True, key="factor_horizon"
+    )
+    factor_horizon = int(factor_horizon_label.removesuffix("日"))
+    factor_view = factor_research[
+        (factor_research["horizon_sessions"] == factor_horizon)
+        & (factor_research["version"] == "中性化")
+    ].copy()
+    st.caption(
+        "收益因子已剔除子行业、对数总市值和20日波动率影响；风险因子剔除子行业与市值，"
+        "保留个股波动性。Rank IC越高，截面排序越有效。"
+    )
+    alpha_view = factor_view[factor_view["factor_type"] == "收益因子"].sort_values("mean_rank_ic", ascending=False)
+    risk_view = factor_view[factor_view["factor_type"] == "风险因子"].sort_values("mean_rank_ic", ascending=False)
+    best_alpha = alpha_view.iloc[0]
+    best_risk = risk_view.iloc[0]
+    with st.container(horizontal=True):
+        st.metric("最佳收益因子", best_alpha["factor_label"], f"IC {best_alpha['mean_rank_ic']:.3f}", border=True)
+        st.metric("收益因子IC中位数", f"{alpha_view['mean_rank_ic'].median():.3f}", border=True)
+        st.metric("最佳风险因子", best_risk["factor_label"], f"IC {best_risk['mean_rank_ic']:.3f}", border=True)
+        st.metric("风险因子IC中位数", f"{risk_view['mean_rank_ic'].median():.3f}", border=True)
+
+    chart_left, chart_right = st.columns(2, gap="medium")
+    with chart_left.container(border=True):
+        st.markdown("**收益因子Rank IC**")
+        alpha_chart = alt.Chart(alpha_view).mark_bar(cornerRadiusEnd=3).encode(
+            x=alt.X("mean_rank_ic:Q", title="平均Rank IC"),
+            y=alt.Y("factor_label:N", title=None, sort="-x"),
+            color=alt.condition("datum.mean_rank_ic > 0", alt.value("#587A95"), alt.value("#C8423B")),
+            tooltip=["factor_label:N", alt.Tooltip("mean_rank_ic:Q", format=".3f"), alt.Tooltip("top_bottom_spread:Q", format=".2%")],
+        ).properties(height=330)
+        st.altair_chart(alpha_chart)
+    with chart_right.container(border=True):
+        st.markdown("**风险因子Rank IC**")
+        risk_chart = alt.Chart(risk_view).mark_bar(cornerRadiusEnd=3, color="#C8423B").encode(
+            x=alt.X("mean_rank_ic:Q", title="平均Rank IC"),
+            y=alt.Y("factor_label:N", title=None, sort="-x"),
+            tooltip=["factor_label:N", alt.Tooltip("mean_rank_ic:Q", format=".3f"), alt.Tooltip("top_bottom_spread:Q", format=".2%")],
+        ).properties(height=330)
+        st.altair_chart(risk_chart)
+
+    available_factor_labels = factor_view.sort_values("factor_label")["factor_label"].tolist()
+    selected_factor_label = st.selectbox("查看十分位结果", available_factor_labels, key="factor_decile_selection")
+    selected_factor = factor_view.loc[factor_view["factor_label"] == selected_factor_label, "factor"].iloc[0]
+    decile_view = factor_deciles[
+        (factor_deciles["horizon_sessions"] == factor_horizon)
+        & (factor_deciles["version"] == "中性化")
+        & (factor_deciles["factor"] == selected_factor)
+    ]
+    with st.container(border=True):
+        target_label = decile_view["target"].iloc[0]
+        st.markdown(f"**{selected_factor_label}：十分位{target_label}**")
+        decile_chart = alt.Chart(decile_view).mark_bar(cornerRadiusEnd=3, color="#587A95").encode(
+            x=alt.X("decile:O", title="因子十分位（1低，10高）"),
+            y=alt.Y("average_target:Q", title=f"平均未来{factor_horizon}日{target_label}", axis=alt.Axis(format="%")),
+            tooltip=[alt.Tooltip("decile:O", title="十分位"), alt.Tooltip("average_target:Q", title=target_label, format=".2%")],
+        ).properties(height=330)
+        st.altair_chart(decile_chart)
+
+with model_tab:
+    st.subheader("滚动训练与真正样本外验证", anchor=False)
+    model_horizon_label = st.segmented_control(
+        "模型周期", ["5日", "20日", "60日", "120日"], default="20日", required=True, key="model_horizon"
+    )
+    model_horizon = int(model_horizon_label.removesuffix("日"))
+    model_summary = model_oos[model_oos["horizon_sessions"] == model_horizon].set_index("model")
+    return_result = model_summary.loc["收益模型"]
+    risk_result = model_summary.loc["回撤模型"]
+    with st.container(horizontal=True):
+        st.metric("收益模型样本外IC", f"{return_result['mean_rank_ic']:.3f}", border=True)
+        st.metric("收益最高-最低十分位", pct(return_result["top_bottom_spread"]), border=True)
+        st.metric("回撤模型样本外IC", f"{risk_result['mean_rank_ic']:.3f}", border=True)
+        st.metric("高-低风险回撤差", pct(risk_result["top_bottom_spread"]), border=True)
+    if return_result["mean_rank_ic"] < 0.03:
+        st.warning(
+            "收益模型的样本外排序能力很弱，不应作为单独买入依据；回撤模型明显更稳定，"
+            "更适合用于排除高风险股票。",
+            icon=":material/warning:",
+        )
+
+    yearly_view = model_oos_yearly[model_oos_yearly["horizon_sessions"] == model_horizon].copy()
+    with st.container(border=True):
+        st.markdown("**逐年样本外Rank IC**")
+        yearly_chart = alt.Chart(yearly_view).mark_bar().encode(
+            x=alt.X("test_year:O", title="测试年份"),
+            y=alt.Y("mean_rank_ic:Q", title="样本外平均Rank IC"),
+            xOffset="model:N",
+            color=alt.Color("model:N", title="模型", scale=alt.Scale(range=["#587A95", "#C8423B"])),
+            tooltip=["test_year:O", "model:N", alt.Tooltip("mean_rank_ic:Q", format=".3f"), alt.Tooltip("top_bottom_spread:Q", format=".2%")],
+        ).properties(height=350)
+        st.altair_chart(yearly_chart)
+
+    current_model = model_scores[model_scores["horizon_sessions"] == model_horizon].copy()
+    current_model = current_model.merge(
+        rankings[["ts_code", "group", "signal_label", "market_rank"]], on="ts_code", how="left"
+    )
+    model_candidates = current_model[
+        (current_model["expected_return_score"] >= 70) & (current_model["drawdown_risk_score"] <= 30)
+    ].sort_values(["expected_return_score", "drawdown_risk_score"], ascending=[False, True])
+    with st.container(border=True):
+        st.markdown("**当前高收益分、低回撤风险观察名单**")
+        st.caption("收益分只代表弱预测模型的相对排序；必须与低回撤风险条件联合使用。")
+        st.dataframe(
+            model_candidates[["name", "ts_code", "healthcare_subindustry", "expected_return_score", "drawdown_risk_score", "group", "signal_label"]],
+            hide_index=True,
+            column_config={
+                "name": st.column_config.TextColumn("股票", pinned=True), "ts_code": "代码", "healthcare_subindustry": "子行业",
+                "expected_return_score": st.column_config.ProgressColumn("收益模型分", min_value=0, max_value=100, format="%.1f"),
+                "drawdown_risk_score": st.column_config.ProgressColumn("回撤风险分", min_value=0, max_value=100, format="%.1f"),
+                "group": "旧趋势标签", "signal_label": "旧研究信号",
+            },
+        )
+    with st.expander("训练与中性化口径"):
+        st.markdown(
+            f"""
+            - 每个测试年度只使用该年度开始前已经结束持有期的样本训练，样本外从{factor_research_meta['oos_start_year']}年开始。
+            - 收益模型和回撤模型分别训练，均使用带L2约束的线性模型；没有把回撤风险硬混入收益预测。
+            - 收益因子中性化：{factor_research_meta['alpha_neutralization']}。
+            - 风险因子中性化：{factor_research_meta['risk_neutralization']}。
+            - 当前股票池回看历史仍有幸存者偏差，未计交易成本、涨跌停、停牌和冲击成本。
             """
         )
 
@@ -476,6 +617,7 @@ with method_tab:
         - **研究信号**：强趋势低过热、强趋势高过热、估值便宜待确认、弱趋势/数据不足。它们是研究优先级，不是买卖评级。
         - **风险分**：追高风险、20日年化波动率和价格数据滞后度的组合；分数越高，风险越高。
         - **A/B/C历史表现**：过去三年非重叠5/20/120日回测中，A组均未表现出更高的平均未来收益，因此分组只描述当前趋势确认程度，不构成收益评级。
+        - **新收益/回撤模型**：收益预测与最大回撤风险分别训练；按年度滚动做样本外验证，并对因子实施子行业、市值和波动率中性化。当前证据支持回撤筛查，但不支持把收益分当作强买入信号。
         - **质量分暂未启用**：当前快照没有ROE、营收增速、扣非利润增速和结构化新闻字段，因此看板不会假装拥有这些信息。
         """
     )

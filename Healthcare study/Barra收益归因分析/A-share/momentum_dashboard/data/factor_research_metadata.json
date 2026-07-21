@@ -1,0 +1,15 @@
+{
+  "data_start": "2019-01-02",
+  "data_end": "2026-07-20",
+  "oos_start_year": 2023,
+  "horizons": [
+    5,
+    20,
+    60,
+    120
+  ],
+  "ridge_alpha": 5.0,
+  "alpha_neutralization": "子行业哑变量 + 对数总市值 + 20日波动率",
+  "risk_neutralization": "子行业哑变量 + 对数总市值；保留个股波动率作为风险信息",
+  "universe_note": "使用当前310只股票的历史数据，存在幸存者偏差。"
+}
