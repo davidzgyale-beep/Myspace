@@ -123,7 +123,9 @@ with st.container(horizontal=True):
     st.metric("20日收益中位数", pct(filtered["ret_20d"].median()), border=True)
     st.metric("高追高风险", f"{(filtered['overheat_score'] >= 90).sum()} 只", border=True)
 
-overview_tab, ranking_tab, stock_tab, method_tab = st.tabs(["市场状态", "股票排名", "个股拆解", "评分方法"])
+overview_tab, ranking_tab, stock_tab, compare_tab, method_tab = st.tabs(
+    ["市场状态", "股票排名", "个股拆解", "个股比较", "评分方法"]
+)
 
 with overview_tab:
     st.subheader("先看结论", anchor=False)
@@ -209,6 +211,138 @@ with stock_tab:
         selected_history = normalized_history(history, [selected_code], {"60日": 60, "120日": 120, "250日": 250}[horizon])
         line = alt.Chart(selected_history).mark_line(color="#D94B4B", strokeWidth=2.5).encode(x=alt.X("trade_date:T", title=None), y=alt.Y("normalized:Q", title="区间起点=100", scale=alt.Scale(zero=False)), tooltip=[alt.Tooltip("trade_date:T", title="日期"), alt.Tooltip("normalized:Q", title="指数", format=".1f")]).properties(height=390).interactive()
         st.altair_chart(line)
+
+with compare_tab:
+    st.subheader("手动选择个股进行比较", anchor=False)
+    st.caption("可从全部310只股票中选择最多8只，不受侧边栏子行业、标签和市值筛选影响。")
+    stock_names = rankings.set_index("ts_code")["name"].to_dict()
+    stock_options = rankings.sort_values("market_rank")["ts_code"].tolist()
+    default_comparison = stock_options[:3]
+    comparison_codes = st.multiselect(
+        "比较股票",
+        stock_options,
+        default=default_comparison,
+        format_func=lambda code: f"{stock_names[code]} · {code}",
+        max_selections=8,
+        placeholder="输入名称或代码搜索，最多选择8只",
+        key="comparison_codes",
+    )
+
+    if not comparison_codes:
+        st.info("请至少选择一只股票开始比较。", icon=":material/compare_arrows:")
+    else:
+        comparison = rankings[rankings["ts_code"].isin(comparison_codes)].sort_values("market_rank").copy()
+        comparison_table = comparison[
+            [
+                "market_rank", "name", "ts_code", "healthcare_subindustry", "group", "signal_label",
+                "momentum_score", "overheat_score", "valuation_score", "risk_score",
+                "ret_5d", "ret_20d", "ret_60d", "ret_120d", "drawdown_60d",
+                "latest_pe_ttm", "latest_pb", "market_cap_100m",
+            ]
+        ]
+        with st.container(border=True):
+            st.markdown("**核心指标对照**")
+            st.dataframe(
+                comparison_table,
+                hide_index=True,
+                column_config={
+                    "market_rank": st.column_config.NumberColumn("总排名", pinned=True, format="%d"),
+                    "name": st.column_config.TextColumn("股票", pinned=True),
+                    "ts_code": "代码",
+                    "healthcare_subindustry": "子行业",
+                    "group": "趋势标签",
+                    "signal_label": "研究信号",
+                    "momentum_score": st.column_config.ProgressColumn("趋势分", min_value=0, max_value=100, format="%.1f"),
+                    "overheat_score": st.column_config.ProgressColumn("过热分", min_value=0, max_value=100, format="%.1f"),
+                    "valuation_score": st.column_config.ProgressColumn("估值分", min_value=0, max_value=100, format="%.1f"),
+                    "risk_score": st.column_config.ProgressColumn("风险分", min_value=0, max_value=100, format="%.1f"),
+                    "ret_5d": st.column_config.NumberColumn("5日", format="percent"),
+                    "ret_20d": st.column_config.NumberColumn("20日", format="percent"),
+                    "ret_60d": st.column_config.NumberColumn("60日", format="percent"),
+                    "ret_120d": st.column_config.NumberColumn("120日", format="percent"),
+                    "drawdown_60d": st.column_config.NumberColumn("距60日高点", format="percent"),
+                    "latest_pe_ttm": st.column_config.NumberColumn("PE_TTM", format="%.1f"),
+                    "latest_pb": st.column_config.NumberColumn("PB", format="%.2f"),
+                    "market_cap_100m": st.column_config.NumberColumn("总市值(亿)", format="%.0f"),
+                },
+            )
+
+        chart_left, chart_right = st.columns(2, gap="medium")
+        with chart_left.container(border=True):
+            st.markdown("**趋势与过热位置**")
+            market_background = alt.Chart(rankings).mark_circle(size=35, color="#C8CDD2", opacity=0.35).encode(
+                x=alt.X("momentum_score:Q", title="趋势分", scale=alt.Scale(domain=[0, 100])),
+                y=alt.Y("overheat_score:Q", title="过热分", scale=alt.Scale(domain=[0, 100])),
+            )
+            selected_points = alt.Chart(comparison).mark_circle(size=180, stroke="white", strokeWidth=1.5).encode(
+                x="momentum_score:Q",
+                y="overheat_score:Q",
+                color=alt.Color("name:N", title="股票"),
+                tooltip=[
+                    alt.Tooltip("name:N", title="股票"),
+                    alt.Tooltip("market_rank:Q", title="总排名"),
+                    alt.Tooltip("momentum_score:Q", title="趋势分", format=".1f"),
+                    alt.Tooltip("overheat_score:Q", title="过热分", format=".1f"),
+                    alt.Tooltip("signal_label:N", title="研究信号"),
+                ],
+            )
+            selected_labels = alt.Chart(comparison).mark_text(dx=9, dy=-9, fontSize=11).encode(
+                x="momentum_score:Q", y="overheat_score:Q", text="name:N", color=alt.Color("name:N", legend=None)
+            )
+            comparison_rules = alt.layer(
+                alt.Chart(pd.DataFrame({"x": [70]})).mark_rule(color="#C8423B", strokeDash=[4, 4]).encode(x="x:Q"),
+                alt.Chart(pd.DataFrame({"y": [90]})).mark_rule(color="#C8423B", strokeDash=[4, 4]).encode(y="y:Q"),
+            )
+            st.altair_chart(
+                (market_background + selected_points + selected_labels + comparison_rules)
+                .properties(height=390)
+                .interactive()
+            )
+
+        with chart_right.container(border=True):
+            st.markdown("**多周期收益对照**")
+            return_comparison = comparison.melt(
+                id_vars=["name"],
+                value_vars=["ret_5d", "ret_20d", "ret_60d", "ret_120d"],
+                var_name="period",
+                value_name="return_value",
+            )
+            return_comparison["period"] = return_comparison["period"].map(
+                {"ret_5d": "5日", "ret_20d": "20日", "ret_60d": "60日", "ret_120d": "120日"}
+            )
+            return_bars = alt.Chart(return_comparison).mark_bar().encode(
+                x=alt.X("period:N", title=None, sort=["5日", "20日", "60日", "120日"]),
+                y=alt.Y("return_value:Q", title="收益率", axis=alt.Axis(format="%")),
+                xOffset="name:N",
+                color=alt.Color("name:N", title="股票"),
+                tooltip=[
+                    alt.Tooltip("name:N", title="股票"),
+                    alt.Tooltip("period:N", title="周期"),
+                    alt.Tooltip("return_value:Q", title="收益率", format=".1%"),
+                ],
+            ).properties(height=390)
+            st.altair_chart(return_bars)
+
+        with st.container(border=True):
+            comparison_horizon = st.segmented_control(
+                "比较区间", ["60日", "120日", "250日"], default="120日", required=True, key="comparison_horizon"
+            )
+            comparison_history = normalized_history(
+                history, comparison_codes, {"60日": 60, "120日": 120, "250日": 250}[comparison_horizon]
+            )
+            comparison_history["name"] = comparison_history["ts_code"].map(stock_names)
+            comparison_line = alt.Chart(comparison_history).mark_line(strokeWidth=2.2).encode(
+                x=alt.X("trade_date:T", title=None),
+                y=alt.Y("normalized:Q", title="区间起点=100", scale=alt.Scale(zero=False)),
+                color=alt.Color("name:N", title="股票"),
+                tooltip=[
+                    alt.Tooltip("trade_date:T", title="日期"),
+                    alt.Tooltip("name:N", title="股票"),
+                    alt.Tooltip("normalized:Q", title="指数", format=".1f"),
+                ],
+            ).properties(height=430).interactive()
+            st.altair_chart(comparison_line)
+            st.caption("所有股票按各自区间首个有效收盘价归一化为100，用于比较相对走势，不代表实际价格。")
 
 with method_tab:
     st.subheader("评分方法与数据边界", anchor=False)
