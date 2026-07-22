@@ -16,6 +16,7 @@ streamlit run streamlit_app.py
 export TUSHARE_TOKEN="your-token"
 python update_prices.py --end-date YYYYMMDD
 python build_snapshot.py
+python update_earnings_calendar.py --report-year YYYY
 ```
 
 `update_prices.py` 按交易日批量补充日线与复权因子，并重建前复权宽表；`build_snapshot.py` 随后读取相邻的 `../Full version/universe` 数据，生成部署所需的轻量文件：
@@ -24,6 +25,7 @@ python build_snapshot.py
 - `data/subindustry_snapshot.csv`
 - `data/price_history.csv.gz`
 - `data/market_state_history.csv`
+- `data/half_year_report_calendar.csv`
 
 应用运行时不会调用 Tushare，也不需要任何密钥。先用原有数据流程更新股票池和前复权行情，再重新运行构建脚本即可更新公开看板。
 
@@ -76,7 +78,7 @@ python factor_research.py
 
 市场状态层分别使用沪深300和当前310只医疗股票的等权指数。20日收益率为正且指数位于MA60上方定义为上涨；20日收益率为正但仍低于MA60定义为修复；20日收益率非正但仍高于MA60定义为转弱；其余定义为下跌。两者组合成风险偏好、医疗独立行情、大盘独涨、医疗修复或防御状态。个股60日大盘Beta和医疗Beta使用原始收益估算，并按当日310只股票横截面三分位标记为低/中/高Beta。市场状态与Beta不进入趋势分、不改变正式风险分，也不改变ABC分组。
 
-主看板固定为5个页签：市场状态、回测结果、评分方法、个股拆解和个股比较。市场状态包含完整股票清单与下载；回测结果使用趋势三档与风险三档的二维矩阵；评分方法分开展示趋势因子权重、回撤风险因子和样本外验证。
+主看板固定为6个页签：市场状态、中报日历、回测结果、评分方法、个股拆解和个股比较。中报日历使用交易所定期报告预约披露口径，默认展示市值前30只重点股，也可切换为全部310只或当前侧边栏筛选股票；市场状态包含完整股票清单与下载；回测结果使用趋势三档与风险三档的二维矩阵；评分方法分开展示趋势因子权重、回撤风险因子和样本外验证。
 
 - A：趋势分不低于70，且过热分低于90。
 - B：趋势分不低于40，但不满足A组；强趋势但过热的股票也归入B组。

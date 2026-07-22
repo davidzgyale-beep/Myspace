@@ -44,6 +44,18 @@ def load_snapshot():
         (DATA_DIR / "survivorship_free_risk_model_metadata.json").read_text(encoding="utf-8")
     )
     metadata = json.loads((DATA_DIR / "metadata.json").read_text(encoding="utf-8"))
+    earnings_calendar = pd.read_csv(
+        DATA_DIR / "half_year_report_calendar.csv",
+        parse_dates=[
+            "first_appointment_date",
+            "first_change_date",
+            "second_change_date",
+            "third_change_date",
+            "appointment_date",
+            "actual_publish_date",
+            "source_updated_at",
+        ],
+    )
     return (
         rankings,
         history,
@@ -57,6 +69,7 @@ def load_snapshot():
         production_risk_model,
         risk_model_metadata,
         metadata,
+        earnings_calendar,
     )
 
 
@@ -173,6 +186,7 @@ def apply_industry_batch() -> None:
     production_risk_model,
     risk_model_meta,
     meta,
+    earnings_calendar,
 ) = load_snapshot()
 rankings = apply_simple_labels(raw_rankings, model_scores)
 current_market_state = market_state_history.iloc[-1]
@@ -284,8 +298,8 @@ with st.container(horizontal=True):
     st.metric("趋势分中位数", f"{filtered['momentum_score'].median():.1f}", border=True)
     st.metric("风险分中位数", f"{filtered['overheat_score'].median():.1f}", border=True)
 
-overview_tab, backtest_tab, method_tab, stock_tab, compare_tab = st.tabs(
-    ["市场状态", "回测结果", "评分方法", "个股拆解", "个股比较"]
+overview_tab, calendar_tab, backtest_tab, method_tab, stock_tab, compare_tab = st.tabs(
+    ["市场状态", "中报日历", "回测结果", "评分方法", "个股拆解", "个股比较"]
 )
 
 with overview_tab:
@@ -482,6 +496,151 @@ with overview_tab:
             "下载当前筛选结果",
             market_table.to_csv(index=False, encoding="utf-8-sig"),
             file_name=f"a_share_healthcare_trend_risk_{meta['as_of_date']}.csv",
+            mime="text/csv",
+            icon=":material/download:",
+        )
+
+with calendar_tab:
+    report_year = int(earnings_calendar["report_year"].iloc[0])
+    st.subheader(f"{report_year}年中报预约披露日历", anchor=False)
+    st.caption(
+        "日期为交易所定期报告预约披露日，不是分析师预测。"
+        "公司可能改期，因此同时保留首次预约日和改期标记。"
+    )
+
+    calendar_scope = st.segmented_control(
+        "股票范围",
+        ["重点股（市值前30）", "当前侧边栏筛选", "全部310只"],
+        default="重点股（市值前30）",
+        required=True,
+        key="calendar_scope",
+    )
+    if calendar_scope == "重点股（市值前30）":
+        calendar_view = earnings_calendar[earnings_calendar["is_key_stock"]].copy()
+    elif calendar_scope == "当前侧边栏筛选":
+        calendar_view = earnings_calendar[
+            earnings_calendar["ts_code"].isin(filtered["ts_code"])
+        ].copy()
+    else:
+        calendar_view = earnings_calendar.copy()
+
+    calendar_view = calendar_view[calendar_view["appointment_date"].notna()].copy()
+    if calendar_view.empty:
+        st.info("当前范围没有可用的中报预约日期。")
+    else:
+        today = pd.Timestamp.now(tz="Asia/Shanghai").tz_localize(None).normalize()
+        calendar_view["days_until"] = (
+            calendar_view["appointment_date"].dt.normalize() - today
+        ).dt.days
+        calendar_view["status"] = np.select(
+            [
+                calendar_view["is_published"],
+                calendar_view["appointment_changed"],
+                calendar_view["days_until"].between(0, 7),
+                calendar_view["days_until"].between(8, 30),
+            ],
+            ["已披露", "已改期", "7日内", "30日内"],
+            default="待披露",
+        )
+        upcoming = calendar_view[calendar_view["days_until"] >= 0]
+        next_date = upcoming["appointment_date"].min() if not upcoming.empty else pd.NaT
+        next_count = (
+            int((upcoming["appointment_date"] == next_date).sum())
+            if pd.notna(next_date)
+            else 0
+        )
+        with st.container(horizontal=True):
+            st.metric("当前显示", f"{len(calendar_view)} 只", border=True)
+            st.metric(
+                "下一预约日",
+                next_date.strftime("%m月%d日") if pd.notna(next_date) else "—",
+                f"{next_count}只" if next_count else None,
+                border=True,
+            )
+            st.metric(
+                "30日内",
+                f"{int(calendar_view['days_until'].between(0, 30).sum())} 只",
+                border=True,
+            )
+            st.metric(
+                "已改期",
+                f"{int(calendar_view['appointment_changed'].sum())} 只",
+                border=True,
+            )
+            st.metric(
+                "已披露",
+                f"{int(calendar_view['is_published'].sum())} 只",
+                border=True,
+            )
+
+        calendar_view["披露周"] = calendar_view["appointment_date"].dt.to_period("W").apply(
+            lambda period: period.start_time
+        )
+        weekly = (
+            calendar_view.groupby("披露周", as_index=False)
+            .size()
+            .rename(columns={"size": "公司数"})
+        )
+        with st.container(border=True):
+            weekly_chart = alt.Chart(weekly).mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
+                x=alt.X("披露周:T", title=None, axis=alt.Axis(format="%m/%d")),
+                y=alt.Y("公司数:Q", title="预约披露公司数"),
+                color=alt.condition(
+                    alt.datum["披露周"] >= today,
+                    alt.value("#587A95"),
+                    alt.value("#B8C0C7"),
+                ),
+                tooltip=[
+                    alt.Tooltip("披露周:T", title="周起始", format="%Y-%m-%d"),
+                    alt.Tooltip("公司数:Q", title="公司数"),
+                ],
+            ).properties(height=250)
+            st.altair_chart(weekly_chart)
+
+        calendar_table = calendar_view.sort_values(
+            ["appointment_date", "importance_rank"]
+        )[
+            [
+                "importance_rank",
+                "name",
+                "ts_code",
+                "healthcare_subindustry",
+                "market_cap_100m",
+                "appointment_date",
+                "first_appointment_date",
+                "status",
+                "days_until",
+                "actual_publish_date",
+            ]
+        ]
+        with st.container(border=True):
+            st.markdown("**公司日历明细**")
+            st.dataframe(
+                calendar_table,
+                hide_index=True,
+                height=560,
+                column_config={
+                    "importance_rank": st.column_config.NumberColumn("市值排名", format="%d"),
+                    "name": st.column_config.TextColumn("股票", pinned=True),
+                    "ts_code": "代码",
+                    "healthcare_subindustry": "子行业",
+                    "market_cap_100m": st.column_config.NumberColumn("总市值(亿)", format="%.0f"),
+                    "appointment_date": st.column_config.DateColumn("当前预约日", format="YYYY-MM-DD"),
+                    "first_appointment_date": st.column_config.DateColumn("首次预约日", format="YYYY-MM-DD"),
+                    "status": "状态",
+                    "days_until": st.column_config.NumberColumn("距今(天)", format="%d"),
+                    "actual_publish_date": st.column_config.DateColumn("实际披露日", format="YYYY-MM-DD"),
+                },
+            )
+            st.caption(
+                f"数据源：交易所预约披露数据（由东方财富聚合）· "
+                f"源数据更新 {earnings_calendar['source_updated_at'].max():%Y-%m-%d %H:%M} · "
+                "预约日可能继续变更，请以公司公告为准。"
+            )
+        st.download_button(
+            "下载当前日历",
+            calendar_table.to_csv(index=False, encoding="utf-8-sig"),
+            file_name=f"a_share_healthcare_half_year_calendar_{report_year}.csv",
             mime="text/csv",
             icon=":material/download:",
         )
