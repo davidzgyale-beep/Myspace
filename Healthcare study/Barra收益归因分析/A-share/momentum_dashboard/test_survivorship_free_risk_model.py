@@ -593,5 +593,19 @@ def run(refresh_membership: bool) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--refresh-membership", action="store_true")
+    parser.add_argument(
+        "--end-date",
+        help="YYYYMMDD; defaults to the latest date in the source price panel",
+    )
     args = parser.parse_args()
+    if args.end_date:
+        pd.to_datetime(args.end_date, format="%Y%m%d", errors="raise")
+        END_DATE = args.end_date
+    else:
+        source_dates = pd.read_csv(
+            SOURCE_DIR / "a_share_healthcare_prices_qfq_wide.csv",
+            usecols=["trade_date"],
+        )["trade_date"]
+        END_DATE = pd.to_datetime(source_dates, errors="raise").max().strftime("%Y%m%d")
+    print(f"Risk model data end date: {END_DATE}")
     run(args.refresh_membership)

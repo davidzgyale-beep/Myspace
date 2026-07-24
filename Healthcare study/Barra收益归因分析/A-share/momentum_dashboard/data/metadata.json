@@ -1,9 +1,9 @@
 {
-  "as_of_date": "2026-07-20",
-  "generated_at": "2026-07-22T02:28:14.801682+08:00",
+  "as_of_date": "2026-07-24",
+  "generated_at": "2026-07-24T16:28:38.739139+08:00",
   "stock_count": 310,
   "subindustry_count": 22,
-  "price_history_start": "2025-01-16",
+  "price_history_start": "2025-01-20",
   "valuation_as_of_date": "2026-07-14",
   "methodology_version": "1.7.0-trend-risk-market-beta",
   "market_state_definition": "20日收益率与相对MA60位置共同判断上涨、修复、转弱、下跌",

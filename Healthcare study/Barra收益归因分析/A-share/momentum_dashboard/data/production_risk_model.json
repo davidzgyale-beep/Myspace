@@ -1,15 +1,15 @@
 {
   "model_version": "动态申万历史7因子-Ridge",
   "horizon_sessions": 20,
-  "intercept": 2.322605124566499e-18,
+  "intercept": 2.0205549606310263e-18,
   "coefficients": {
-    "risk_intraday_atr_20d": 0.01403856278214276,
-    "risk_volatility_60d": 0.008566392576647942,
-    "risk_downside_volatility_60d": -0.004032100253914716,
-    "risk_max_return_20d": 0.0006572037976702578,
-    "risk_gap_extreme_down_60d": 0.001299609406183991,
-    "risk_healthcare_beta_60d": -0.0017256487072439845,
-    "risk_crowding_quarter_change": -0.0019654340324806513
+    "risk_intraday_atr_20d": 0.014038562782142666,
+    "risk_volatility_60d": 0.008566392576647973,
+    "risk_downside_volatility_60d": -0.004032100253914674,
+    "risk_max_return_20d": 0.0006572037976703009,
+    "risk_gap_extreme_down_60d": 0.0012996094061839675,
+    "risk_healthcare_beta_60d": -0.0017256487072439901,
+    "risk_crowding_quarter_change": -0.001965434032480636
   },
   "training_end": "2026-07-08",
   "training_start": "2019-07-03",
