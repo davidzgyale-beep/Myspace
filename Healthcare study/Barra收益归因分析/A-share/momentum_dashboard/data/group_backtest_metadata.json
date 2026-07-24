@@ -23,7 +23,7 @@
       "forward_sessions": 5,
       "rebalance_sessions": 5,
       "rebalance_count": 146,
-      "observation_count": 44092
+      "observation_count": 44207
     },
     "20": {
       "start_entry_date": "2023-07-05",
@@ -32,7 +32,7 @@
       "forward_sessions": 20,
       "rebalance_sessions": 20,
       "rebalance_count": 37,
-      "observation_count": 11160
+      "observation_count": 11189
     },
     "120": {
       "start_entry_date": "2023-02-07",
@@ -41,7 +41,7 @@
       "forward_sessions": 120,
       "rebalance_sessions": 120,
       "rebalance_count": 7,
-      "observation_count": 2098
+      "observation_count": 2103
     }
   },
   "universe_note": "风险模型训练使用调仓日有效的申万医药生物历史成员，包含退市及被剔除股票；收益矩阵的展示股票仍为当前310只广义医疗股票。"

@@ -265,7 +265,8 @@ with st.sidebar:
     market_cap_range = st.slider("总市值（亿元）", 0, market_cap_max, (0, market_cap_max), 10)
     search = st.text_input("搜索股票", placeholder="输入名称或代码")
     st.caption(
-        f"行情截止 {meta['as_of_date']} · 趋势口径 固定公式100分制 · "
+        f"行情截止 {meta['as_of_date']} · 市值截止 {meta['valuation_as_of_date']} · "
+        "近期行情均按交易日计算 · 趋势口径 固定公式100分制 · "
         f"风险口径 {RISK_HORIZON}日最大不利波动（MAE）"
     )
 
@@ -307,15 +308,15 @@ with overview_tab:
     with st.container(horizontal=True):
         st.metric("综合状态", current_market_state["market_regime"], border=True)
         st.metric(
-            "沪深300",
+            "沪深300（20个交易日）",
             current_market_state["market_state"],
-            pct(current_market_state["market_ret_20d"]),
+            f"20日收益 {pct(current_market_state['market_ret_20d'])}",
             border=True,
         )
         st.metric(
-            "医疗等权",
+            "医疗等权（20个交易日）",
             current_market_state["healthcare_state"],
-            pct(current_market_state["healthcare_ret_20d"]),
+            f"20日收益 {pct(current_market_state['healthcare_ret_20d'])}",
             border=True,
         )
         st.metric(
@@ -328,6 +329,7 @@ with overview_tab:
             pct(current_market_state["healthcare_ma60_gap"]),
             border=True,
         )
+    st.caption("状态由20个交易日收益与MA60位置共同判断，不代表自然周涨跌。")
     st.info(
         beta_context(current_market_state, current_market_state["market_regime"]),
         icon=":material/strategy:",

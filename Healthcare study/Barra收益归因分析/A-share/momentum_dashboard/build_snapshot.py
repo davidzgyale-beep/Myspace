@@ -104,6 +104,7 @@ def classify_group(row: pd.Series) -> str:
 def build_snapshot(source_dir: Path) -> None:
     universe_path = source_dir / "a_share_healthcare_universe.csv"
     prices_path = source_dir / "a_share_healthcare_prices_qfq_wide.csv"
+    daily_basic_path = source_dir / "a_share_healthcare_daily_basic_long.csv"
     universe = pd.read_csv(universe_path, dtype={"symbol": "string"})
     prices = pd.read_csv(prices_path, index_col="trade_date", parse_dates=True)
     prices = prices.apply(pd.to_numeric, errors="coerce").sort_index()
@@ -164,17 +165,37 @@ def build_snapshot(source_dir: Path) -> None:
     metrics = metrics.reset_index()
 
     keep = [
-        "ts_code", "name", "healthcare_subindustry", "classification_confidence",
-        "market", "total_mv_cny", "latest_turnover_rate", "latest_pe_ttm", "latest_pb",
+        "ts_code", "name", "healthcare_subindustry", "classification_confidence", "market",
     ]
     metrics = metrics.merge(universe[keep], on="ts_code", how="left", validate="one_to_one")
-    metrics["market_cap_100m"] = pd.to_numeric(metrics["total_mv_cny"], errors="coerce") / 1e8
+
+    daily_basic = pd.read_csv(
+        daily_basic_path,
+        usecols=["ts_code", "trade_date", "total_mv", "turnover_rate", "pe_ttm", "pb"],
+    )
+    daily_basic["trade_date"] = pd.to_datetime(daily_basic["trade_date"], format="mixed", errors="coerce")
+    daily_basic = daily_basic[
+        daily_basic["ts_code"].isin(universe["ts_code"]) & (daily_basic["trade_date"] <= latest_date)
+    ].copy()
+    latest_basic = (
+        daily_basic.sort_values(["ts_code", "trade_date"])
+        .drop_duplicates("ts_code", keep="last")
+        .rename(
+            columns={
+                "trade_date": "valuation_as_of_date",
+                "turnover_rate": "latest_turnover_rate",
+                "pe_ttm": "latest_pe_ttm",
+                "pb": "latest_pb",
+            }
+        )
+    )
+    metrics = metrics.merge(latest_basic, on="ts_code", how="left", validate="one_to_one")
+    # Tushare reports total_mv in RMB 10,000; dividing by 10,000 converts it to RMB 100m.
+    metrics["market_cap_100m"] = pd.to_numeric(metrics["total_mv"], errors="coerce") / 1e4
     metrics["latest_pe_ttm"] = pd.to_numeric(metrics["latest_pe_ttm"], errors="coerce")
     metrics["latest_pb"] = pd.to_numeric(metrics["latest_pb"], errors="coerce")
     metrics["price_stale_days"] = (latest_date - pd.to_datetime(metrics["price_date"])).dt.days
-    valuation_dates = pd.to_datetime(universe["market_value_trade_date"].astype("string"), format="%Y%m%d", errors="coerce")
-    valuation_date = valuation_dates.max()
-    metrics["valuation_as_of_date"] = valuation_date
+    valuation_date = metrics["valuation_as_of_date"].max()
     metrics["pe_valid"] = metrics["latest_pe_ttm"] > 0
     metrics["pb_valid"] = metrics["latest_pb"] > 0
     metrics["pe_percentile_sub"] = positive_subindustry_percentile(metrics, "latest_pe_ttm")
